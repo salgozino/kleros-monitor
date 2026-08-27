@@ -1,0 +1,14 @@
+# Ignore the following files and directories
+
+# Agents helpers
+.atl/
+
+# Logs & Run data
+dossiers/*
+logs/*
+state*.json
+agent-journal.jsonl
+
+# Secrets
+.env*
+!.env.example
