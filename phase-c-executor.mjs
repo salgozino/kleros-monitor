@@ -72,6 +72,37 @@ function readVerdict(dispute, round) {
   };
 }
 
+// Read template.json answers array from the dossier for a given dispute/round.
+// Returns the top-level `answers` array (non-empty) on success.
+// Returns null on: file missing, JSON parse error, missing `answers`, non-array, or empty array.
+// Never throws.
+function readTemplateAnswers(dispute, round) {
+  const p = `${WORKDIR}/dossiers/${dispute}-r${round}/template.json`;
+  try {
+    const txt = readFileSync(p, "utf8");
+    const obj = JSON.parse(txt);
+    if (!Array.isArray(obj.answers) || obj.answers.length === 0) return null;
+    return obj.answers;
+  } catch {
+    return null;
+  }
+}
+
+// Map each element through Number(), sort ascending.
+// Only call on already-split, non-empty-guarded input — never directly on a possibly-empty string.
+function sortNums(arr) {
+  return arr.map(Number).sort((a, b) => a - b);
+}
+
+// Deep-equal check for two sorted numeric arrays.
+function arraysEqual(a, b) {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
 function klerosStatus(dispute, round, votes) {
   const args = ["status", "--dispute", String(dispute), "--round", String(round), "--votes", votes];
   try {
@@ -120,6 +151,38 @@ function main() {
     if (status.parseError) { log(`draw ${key}: status error ${status.parseError}`); continue; }
     const period = status.period;
     const actionReq = status.actionRequired;
+
+    // Vote-safety guard: cross-validate CHOICE/VOTES against on-chain truth and
+    // dossier ruling range before any on-chain call. Fail-closed on all failure modes.
+    const onchainArr = st.seen[key];
+    if (onchainArr.length === 0) {
+      const reason = "empty on-chain vote set";
+      console.log(`🛑 HALT dispute ${dispute} r${round}: ${reason}. expected(on-chain)=n/a actual(verdict.md)=n/a. NO on-chain action taken. Operator: verify verdict.md/dossier then re-run.`);
+      log(`draw ${key}: HALT — ${reason}`);
+      continue;
+    }
+    const onchain = sortNums(onchainArr);
+    const declaredStr = (v.votes || "").trim();
+    const declared = declaredStr === "" ? [] : sortNums(declaredStr.split(","));
+    const answers = readTemplateAnswers(dispute, round);
+    if (answers === null) {
+      const reason = "ruling range unavailable";
+      console.log(`🛑 HALT dispute ${dispute} r${round}: ${reason}. expected(on-chain)=n/a actual(verdict.md)=n/a. NO on-chain action taken. Operator: verify verdict.md/dossier then re-run.`);
+      log(`draw ${key}: HALT — ${reason}`);
+      continue;
+    }
+    if (v.choice < 0 || v.choice > answers.length) {
+      const reason = `CHOICE out of range [0..${answers.length}]`;
+      console.log(`🛑 HALT dispute ${dispute} r${round}: ${reason}. expected(on-chain)=n/a actual(verdict.md)=${v.choice}. NO on-chain action taken. Operator: verify verdict.md/dossier then re-run.`);
+      log(`draw ${key}: HALT — ${reason}`);
+      continue;
+    }
+    if (!arraysEqual(onchain, declared)) {
+      const reason = "VOTES mismatch";
+      console.log(`🛑 HALT dispute ${dispute} r${round}: ${reason}. expected(on-chain)=${onchain.join(",")} actual(verdict.md)=${declared.join(",")}. NO on-chain action taken. Operator: verify verdict.md/dossier then re-run.`);
+      log(`draw ${key}: HALT — ${reason} expected=${onchain.join(",")} actual=${declared.join(",")}`);
+      continue;
+    }
 
     if (period === "commit" && (actionReq === "commit" || actionReq === "commit_or_reveal")) {
       log(`draw ${key}: COMMIT choice=${v.choice} broadcast=${BROADCAST}`);
