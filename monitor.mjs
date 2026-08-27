@@ -1,0 +1,456 @@
+#!/usr/bin/env node
+// kleros-draw-monitor — detects if OUR juror address has been drawn in a
+// Kleros Court V2 dispute (Arbitrum One).
+//
+// How it works:
+//   1. Incrementally scans KlerosCore `Draw(address indexed, uint256 indexed, uint256, uint256)`
+//      logs filtered by our juror address (topic1).
+//   2. Groups hits by (disputeID, roundID) and cross-checks on-chain round data
+//      (getRoundInfo) to derive our exact vote IDs.
+//   3. Prints an alert (with ready-to-run kleros-juror commands) ONLY when a new
+//      draw appears. Silence = nothing new. Designed for a 5-minute watchdog cron
+//      in no-agent mode: stdout IS the alert, empty stdout stays silent.
+//
+// Safety: never touches the private key, never broadcasts anything. Read-only.
+
+import { existsSync, readFileSync, writeFileSync, renameSync, openSync, closeSync, statSync, unlinkSync } from "node:fs";
+import { execFile as execFileCb } from "node:child_process";
+import { promisify } from "node:util";
+import { createRequire } from "node:module";
+
+const execFile = promisify(execFileCb);
+
+const require = createRequire(import.meta.url);
+const VIEM = "/usr/local/lib/node_modules/kleros-juror-cli/node_modules/viem";
+const { encodeFunctionData, decodeFunctionResult } = require(VIEM);
+
+// ---------------------------------------------------------------- config ---
+// KLEROS_JUROR_ADDRESS exists ONLY for testing (simulate another juror).
+const JUROR = (process.env.KLEROS_JUROR_ADDRESS || "0x606D2DD4Ca178349b327Ed7ACacf68058bd748Bc").toLowerCase(); // derived from ~/.kleros-juror/key (address.js)
+const CORE = "0x991d2df165670b9cac3B022f4B68D65b664222ea"; // KlerosCore proxy, Arbitrum One
+const TOPIC_DRAW = "0x6119cf536152c11e0a9a6c22f3953ce4ecc93ee54fa72ffa326ffabded21509b"; // keccak(Draw(address,uint256,uint256,uint256))
+const RPC_URLS = [
+  "https://arb1.arbitrum.io/rpc", // official; generous getLogs ranges
+  "https://arbitrum-one-rpc.publicnode.com", // rejects old ranges without token
+];
+const WORKDIR = "/root/kleros-monitor";
+// State is per-juror so test runs with KLEROS_JUROR_ADDRESS never touch real state.
+const STATE_FILE = `${WORKDIR}/state-${JUROR.slice(2, 10)}.json`;
+const LOCK_FILE = `/tmp/kleros-draw-monitor-${JUROR.slice(2, 10)}.lock`;
+const INIT_LOOKBACK_BLOCKS = Number(process.env.INIT_LOOKBACK_BLOCKS || 5_000_000); // ~2 weeks on Arbitrum
+const BLOCKS_PER_DAY = 345_600; // ~250 ms/block, only used for hints
+const PERIOD_NAMES = ["evidence", "commit", "vote", "appeal", "execution"];
+
+// ---------------------------------------------------------------- state ----
+function loadState() {
+  if (!existsSync(STATE_FILE)) return null;
+  try { return JSON.parse(readFileSync(STATE_FILE, "utf8")); } catch { return null; }
+}
+function saveState(st) {
+  const tmp = STATE_FILE + ".tmp";
+  writeFileSync(tmp, JSON.stringify(st));
+  renameSync(tmp, STATE_FILE);
+}
+
+// Single-instance lock (stale locks older than 10 min are removed).
+let lockFd = null;
+function acquireLock() {
+  try {
+    lockFd = openSync(LOCK_FILE, "wx");
+  } catch {
+    let age = Infinity;
+    try { age = Date.now() - statSync(LOCK_FILE).mtimeMs; } catch {}
+    if (age < 600_000) process.exit(0); // another run is alive; stay silent
+    try { unlinkSync(LOCK_FILE); } catch {}
+    try { lockFd = openSync(LOCK_FILE, "wx"); } catch { process.exit(0); }
+  }
+}
+
+// ------------------------------------------------------------- json rpc ----
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function rpc(endpoint, method, params, timeoutMs = 20_000) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      signal: ctrl.signal,
+      body: JSON.stringify({ jsonrpc: "2.0", id: Date.now(), method, params }),
+    });
+    const text = await res.text();
+    let j;
+    try { j = JSON.parse(text); } catch { throw new Error(`non-JSON response from ${endpoint}: ${text.slice(0, 80)}`); }
+    if (j.error) throw new Error(`rpc ${method}: ${j.error.message || JSON.stringify(j.error)}`);
+    return j.result;
+  } finally { clearTimeout(t); }
+}
+
+// Tries every endpoint until one answers.
+async function rpcAny(method, params) {
+  let lastErr;
+  for (const url of RPC_URLS) {
+    try { return await rpc(url, method, params); } catch (e) { lastErr = e; }
+  }
+  throw lastErr ?? new Error("all RPC endpoints failed");
+}
+
+async function rpcWithRetry(method, params, attempts = 3) {
+  let lastErr;
+  for (let i = 0; i < attempts; i++) {
+    try { return await rpcAny(method, params); } catch (e) { lastErr = e; await sleep(1500 * (i + 1)); }
+  }
+  throw lastErr;
+}
+
+const hex = (n) => "0x" + n.toString(16);
+
+// --------------------------------------------------------- chain reads -----
+const ROUND_ABI = [{
+  type: "function", name: "getRoundInfo", stateMutability: "view",
+  inputs: [{ type: "uint256" }, { type: "uint256" }],
+  outputs: [{
+    name: "", type: "tuple", components: [
+      { name: "disputeKitID", type: "uint256" },
+      { name: "pnkAtStakePerJuror", type: "uint256" },
+      { name: "totalFeesForJurors", type: "uint256" },
+      { name: "nbVotes", type: "uint256" },
+      { name: "repartitions", type: "uint256" },
+      { name: "pnkPenalties", type: "uint256" },
+      { name: "drawnJurors", type: "address[]" },
+      { name: "sumFeeRewardPaid", type: "uint256" },
+      { name: "sumPnkRewardPaid", type: "uint256" },
+      { name: "feeToken", type: "address" },
+      { name: "drawIterations", type: "uint256" },
+    ],
+  }],
+}];
+
+async function getRoundInfo(disputeID, round) {
+  const data = encodeFunctionData({ abi: ROUND_ABI, args: [BigInt(disputeID), BigInt(round)] });
+  const res = await rpcWithRetry("eth_call", [{ to: CORE, data }, "latest"]);
+  return decodeFunctionResult({ abi: ROUND_ABI, data: res });
+}
+
+// disputes(): the deployed proxy returns the 5 STATIC leading fields as flat words:
+// (uint96 courtID, address arbitrated, uint8 period, bool ruled, uint256 lastPeriodChange)
+// (the dynamic Round[] tail is truncated out by the ABI encoder for this accessor shape)
+async function getDisputeHeader(disputeID) {
+  const { keccak256, stringToHex } = require(VIEM);
+  const sel = keccak256(stringToHex("disputes(uint256)")).slice(0, 10);
+  const arg = BigInt(disputeID).toString(16).padStart(64, "0");
+  const res = await rpcWithRetry("eth_call", [{ to: CORE, data: sel + arg }, "latest"]);
+  const b = res.replace(/^0x/, "");
+  if (b.length < 64 * 5) throw new Error(`disputes(${disputeID}): unexpected returndata length ${b.length / 2}`);
+  const w = [];
+  for (let i = 0; i < 5; i++) w.push(BigInt("0x" + b.slice(i * 64, (i + 1) * 64)));
+  return {
+    courtID: w[0].toString(),
+    arbitrated: "0x" + w[1].toString(16).padStart(40, "0").slice(-40),
+    period: Number(w[2]),
+    ruled: w[3] !== 0n,
+    lastPeriodChange: w[4],
+  };
+}
+
+// ------------------------------------------------------------- getLogs -----
+async function fetchDrawLogs(fromBlock, toBlock) {
+  const params = [{
+    address: CORE,
+    topics: [
+      TOPIC_DRAW,
+      "0x" + JUROR.toLowerCase().replace(/^0x/, "").padStart(64, "0"), // our address
+      null, // any dispute
+    ],
+    fromBlock: hex(fromBlock),
+    toBlock: hex(toBlock),
+  }];
+  const logs = await rpcWithRetry("eth_getLogs", params);
+  const out = [];
+  for (const lg of logs) {
+    const data = lg.data.replace(/^0x/, "");
+    out.push({
+      disputeID: BigInt(lg.topics[2]).toString(),
+      roundID: Number(BigInt("0x" + data.slice(0, 64))),
+      voteID: Number(BigInt("0x" + data.slice(64, 128))),
+      txHash: lg.transactionHash,
+      blockNumber: parseInt(lg.blockNumber, 16),
+    });
+  }
+  return out;
+}
+
+// Scans [fromBlock..toBlock] with adaptive chunk sizes (public RPCs cap ranges).
+async function scanRange(fromBlock, toBlock) {
+  const events = [];
+  let chunk = 50_000; // arb1.arbitrum.io accepted 50k fine; halves on failure
+  let cursor = fromBlock;
+  while (cursor <= toBlock) {
+    const hi = Math.min(cursor + chunk - 1, toBlock);
+    try {
+      const evs = await fetchDrawLogs(cursor, hi);
+      events.push(...evs);
+      cursor = hi + 1;
+      chunk = Math.min(chunk * 2, 200_000);
+    } catch {
+      chunk = Math.floor(chunk / 2);
+      if (chunk < 5_000) throw new Error(`eth_getLogs keeps failing at block ${cursor}`);
+    }
+  }
+  return events;
+}
+
+// ------------------------------------------------------------ rendering ----
+// Optional enrichment via @kleros/agentkit (official Kleros read-only CLI):
+// adds deadline, juror count and human-readable ruling options to the alert.
+// Best-effort: if the binary is missing or slow, we alert anyway.
+async function enrichViaAgentkit(disputeID) {
+  try {
+    const { stdout } = await execFile("kleros", ["dispute", "get", String(disputeID), "--chain", "arbitrum-one", "--format", "json"], { timeout: 45_000 });
+    const parsed = JSON.parse(stdout);
+    const it = parsed?.items?.[0];
+    if (!it) return null;
+    const opts = (it.rulingOptions || [])
+      .map((o) => `${o.value}=${o.title}`)
+      .slice(0, 6)
+      .join(" | ");
+    return {
+      deadline: it.deadline || null,
+      jurorCount: it.round?.jurorCount ?? null,
+      status: it.status || null,
+      rulingLabel: typeof it.ruling === "number" || typeof it.ruling === "string" ? it.rulingLabel : null,
+      options: opts || null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function fmtDate(tsSec) {
+  return new Date(Number(tsSec) * 1000).toISOString().replace("T", " ").slice(0, 16) + " UTC";
+}
+
+function renderAlert(groups, isNewMap, opts = {}) {
+  const lines = [];
+  lines.push("⚖️ SORTEO EN KLEROS COURT V2 ⚖️");
+  lines.push("");
+  // NOTE: this text is the hash input for the cron monitor_script gate.
+  // It MUST be byte-stable within a single (dispute, round, period) state so
+  // identical situations suppress the agent, and only real transitions wake it.
+  // No timestamps, no "nuevo/conocido" tags, no live-majority fields here.
+  for (const g of groups.sort((a, b) => Number(a.disputeID) - Number(b.disputeID))) {
+    lines.push(`━━━ Disputa ${g.disputeID} · Ronda ${g.roundID} ━━━`);
+    lines.push(`Votos nuestros : ${g.voteIDs.join(", ")}`);
+    if (!g.dispute) {
+      lines.push("(no se pudo leer el estado on-chain de la disputa en este momento)");
+      lines.push("");
+      continue;
+    }
+    lines.push(`Período actual : ${PERIOD_NAMES[g.dispute.period] ?? "?"} (${g.dispute.period})`);
+    lines.push(`Corte          : ${g.dispute.courtID}   |   Ruled: ${g.dispute.ruled ? "sí" : "no"}`);
+    lines.push(`Arbitrable     : ${g.dispute.arbitrated}`);
+    // NOTE: lastPeriodChange is a timestamp and changes every tick — but it is
+    // EXCLUDED from the monitor gate hash (see renderGateView below). Only
+    // dispute/round/period identity drives wake/suppress decisions.
+    if (g.enrich) {
+      const e = g.enrich;
+      if (e.jurorCount != null) lines.push(`Jurors en ronda: ${e.jurorCount} (votos nuestros: ${g.voteIDs.length})`);
+      if (e.deadline) lines.push(`Deadline del período: ${new Date(e.deadline).toISOString().replace("T", " ").slice(0, 16)} UTC`);
+      if (e.options) lines.push(`Opciones de voto: ${e.options}`);
+      // Live majority deliberately omitted from gate text (changes as votes land,
+      // would re-wake the agent mid-period without any new actionable state).
+    }
+    for (const e of g.events) lines.push(`Draw tx        : https://arbiscan.io/tx/${e.txHash}`);
+    const votesArg = g.voteIDs.join(",");
+    lines.push("");
+    lines.push(`Siguiente paso (decidir el voto ANTES de actuar):`);
+    lines.push(`  kleros-juror status --dispute ${g.disputeID} --round ${g.roundID} --votes ${votesArg}`);
+    if (!g.dispute.ruled && g.dispute.period === 0)
+      lines.push("⏱️ Estamos en EVIDENCE — con corte 34 esto dura ~10 min, MUY corto. Empezá a leer el dossier YA (no esperes a commit). No commitees todavía: el período no lo permite. Dejá el veredicto redactado y listo para el próximo tick.");
+    if (!g.dispute.ruled && g.dispute.period === 1)
+      lines.push("⏳ Estamos en COMMIT: la ventana suele ser CORTA (~45 min). Decidí y commiteá ya.");
+    if (!g.dispute.ruled && g.dispute.period === 2)
+      lines.push("⏳ Estamos en VOTE: corré `kleros-juror status` YA — te dice si hay que revelar y el deadline exacto.");
+    if (g.dispute.period === 4 || g.dispute.ruled)
+      lines.push("ℹ️ La disputa ya está ejecutada/cerrada: solo registro informativo.");
+    lines.push("");
+  }
+  if (opts.footer) { lines.push(opts.footer); lines.push(""); }
+  return lines.join("\n");
+}
+
+// --------------------------------------------------------------- main ------
+async function main() {
+  const statusOnly = process.argv.includes("--status");
+
+  const headHex = await rpcWithRetry("eth_blockNumber", []);
+  const head = parseInt(headHex, 16);
+
+  let state = loadState();
+  let firstRun = false;
+  if (!state) {
+    firstRun = true;
+    state = { lastBlock: Math.max(0, head - INIT_LOOKBACK_BLOCKS), seen: {} };
+  }
+
+  // Status mode is read-only: report what we already know, enriched live.
+  if (statusOnly) {
+    console.log(`# kleros-draw-monitor · juror ${JUROR}`);
+    console.log(`# bloque escaneado hasta: ${state.lastBlock} | head actual: ${head}`);
+    const keys = Object.keys(state.seen);
+    console.log(`# sorteos conocidos: ${keys.length}`);
+    if (!keys.length) { console.log("# sin sorteos registrados todavía."); return; }
+    const groups = [];
+    for (const k of keys) {
+      const [d, r] = k.split("/");
+      const g = { disputeID: d, roundID: Number(r), voteIDs: state.seen[k], events: [] };
+      try { g.dispute = await getDisputeHeader(d); } catch { g.dispute = null; }
+      groups.push(g);
+    }
+    const noneNew = new Map(keys.map((k) => [k, false]));
+    process.stdout.write(renderAlert(groups, noneNew));
+    return;
+  }
+
+  const events = await scanRange(state.lastBlock + (firstRun ? 0 : 1), head);
+
+  // Group by dispute/round.
+  const byKey = new Map();
+  for (const e of events) {
+    const k = `${e.disputeID}/${e.roundID}`;
+    if (!byKey.has(k)) byKey.set(k, { disputeID: e.disputeID, roundID: e.roundID, voteSet: new Set(), events: [] });
+    const g = byKey.get(k);
+    g.voteSet.add(e.voteID);
+    g.events.push(e);
+  }
+
+  // Enrich + verify vote IDs against getRoundInfo (source of truth).
+  const groups = [];
+  for (const g of byKey.values()) {
+    const [dispute, roundInfo] = await Promise.all([getDisputeHeader(g.disputeID), getRoundInfo(g.disputeID, g.roundID)]);
+    // Derive our vote IDs from drawnJurors order (authoritative).
+    const derived = [];
+    (roundInfo.drawnJurors || []).forEach((addr, i) => {
+      if (addr.toLowerCase() === JUROR.toLowerCase()) derived.push(i);
+    });
+    g.voteIDs = derived.length ? derived : [...g.voteSet].sort((a, b) => a - b);
+    g.nbVotes = Number(roundInfo.nbVotes);
+    g.dispute = dispute;
+    groups.push(g);
+  }
+
+  // Which keys are NEW?
+  const isNewMap = new Map();
+  const fresh = [];
+  for (const g of groups) {
+    const k = `${g.disputeID}/${g.roundID}`;
+    const prev = state.seen[k];
+    if (!prev) { isNewMap.set(k, true); fresh.push(g); continue; }
+    const newVotes = g.voteIDs.filter((v) => !prev.includes(v));
+    if (newVotes.length) { isNewMap.set(k, true); fresh.push(g); }
+    else isNewMap.set(k, false);
+  }
+
+  // Re-alert while a KNOWN draw (from persisted state) sits inside an actionable
+  // window (un-ruled + commit=1 or vote=2): a missed alert must never cost us a
+  // case. Incremental scans don't re-see old draws, so we check them explicitly.
+  const alreadyAlerted = new Set(fresh.map((g) => `${g.disputeID}/${g.roundID}`));
+  for (const k of Object.keys(state.seen)) {
+    if (alreadyAlerted.has(k)) continue;
+    const [d, r] = k.split("/");
+    try {
+      const dispute = await getDisputeHeader(d);
+      if (!dispute.ruled && (dispute.period === 1 || dispute.period === 2)) {
+        fresh.push({ disputeID: d, roundID: Number(r), voteIDs: state.seen[k], events: [], dispute });
+      }
+    } catch { /* transient RPC failure on one dispute must not kill the tick */ }
+  }
+
+  // Best-effort enrichment (agentkit) only for what we are about to alert on.
+  for (const g of fresh) {
+    g.enrich = await enrichViaAgentkit(g.disputeID);
+  }
+
+  // Persist state BEFORE printing (crash-safety: prefer re-alert over losing one).
+  for (const g of groups) state.seen[`${g.disputeID}/${g.roundID}`] = g.voteIDs;
+  state.lastBlock = head;
+  saveState(state);
+
+  if (fresh.length === 0) {
+    // Silent success: nothing new. (Watchdog convention.)
+    return;
+  }
+
+  const footer = firstRun
+    ? "(escaneo inicial: sorteos históricos encontrados dentro de la ventana de búsqueda)"
+    : undefined;
+  if (!GATE_MODE) process.stdout.write(renderAlert(fresh, isNewMap, { footer }));
+}
+
+// ------------------------------------------------------- cron monitor gate --
+// When the cron job runs this file as its monitor_script, Hermes hashes the
+// ENTIRE stdout: UNCHANGED output suppresses the agent tick entirely, CHANGED
+// output wakes the agent with a diff. The full alert above contains volatile
+// fields (deadlines rendered from agentkit, draw tx lists, footers), so the
+// gate must hash a STABLE VIEW keyed only by actionable identity:
+//   (disputeID, roundID, period, ruled) per known draw.
+// Same view twice in a row -> silent no-op tick (no agent, no tokens).
+// Any transition (new draw, commit->vote, vote->appeal, ruled) -> agent wakes.
+function renderGateView(fresh) {
+  const lines = fresh.map((g) =>
+    `dispute=${g.disputeID} round=${g.roundID} period=${g.dispute?.period ?? "?"} ruled=${g.dispute?.ruled ? 1 : 0}`
+  );
+  lines.sort();
+  return lines.join("\n");
+}
+
+acquireLock();
+const GATE_MODE = process.argv.includes("--gate");
+
+main()
+  .then(async () => {
+    // --gate: cron monitor_script mode. main() already computed `fresh` but it
+    // is scoped inside; re-derive the gate view from persisted state instead.
+    if (!GATE_MODE) return;
+    const st = loadState();
+    if (!st || Object.keys(st.seen).length === 0) {
+      console.log("no-known-draws");
+      return;
+    }
+    const fresh = [];
+    for (const k of Object.keys(st.seen)) {
+      const [d, r] = k.split("/");
+      let dispute = null;
+      try { dispute = await getDisputeHeader(d); } catch {}
+      fresh.push({ disputeID: d, roundID: Number(r), voteIDs: st.seen[k], dispute });
+    }
+    // Only actionable states belong in the gate view. A draw is actionable if:
+    //   - it is in an active period (evidence=0, commit=1, vote=2), OR
+    //   - its dossier is NOT yet complete (chunkCount===0 / no manifest), meaning
+    //     Fase A (download) is still in progress and must keep retrying each tick.
+    // A draw in appeal/execution with a complete dossier is NOT actionable
+    // (nothing to do). This keeps the agent waking until evidence is downloaded.
+    const actionable = fresh.filter((g) => {
+      if (!g.dispute || g.dispute.ruled) return false;
+      if (g.dispute.period === 0 || g.dispute.period === 1 || g.dispute.period === 2) return true;
+      // period 3 (appeal) or 4 (execution): actionable only if dossier incomplete
+      const dir = `${WORKDIR}/dossiers/${g.disputeID}-r${g.roundID}`;
+      const manifestPath = `${dir}/manifest.json`;
+      if (!existsSync(manifestPath)) return true;
+      try {
+        const m = JSON.parse(readFileSync(manifestPath, "utf8"));
+        return (m.chunkCount || 0) === 0;
+      } catch { return true; }
+    });
+    process.stdout.write(actionable.length ? renderGateView(actionable) : "no-actionable-draws");
+  })
+  .catch((e) => {
+    console.error(`[kleros-draw-monitor] ERROR: ${e.message || e}`);
+    process.exitCode = 1;
+  })
+  .finally(() => {
+    // Release the single-instance lock no matter how the run ended.
+    try { closeSync(lockFd); } catch {}
+    try { unlinkSync(LOCK_FILE); } catch {}
+  });
