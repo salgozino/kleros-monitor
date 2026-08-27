@@ -20,13 +20,12 @@ import { mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync, statSy
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 
-import { CORE, DISPUTERESOLVER, DRT, RPC_URLS, IPFS_GATEWAYS, WORKDIR, VIEM_PATH } from "./constants.mjs";
+import { CORE, DISPUTERESOLVER, DRT, RPC_URLS, IPFS_GATEWAYS, WORKDIR, EVIDENCE_CHAIN } from "./constants.mjs";
 import { rpcWithRetry, getLogs } from "./helpers/rpc.mjs";
 import { fetchIpfs } from "./helpers/ipfs.mjs";
 import { sleep } from "./helpers/utils.mjs";
 
 const require = createRequire(import.meta.url);
-const { keccak256, stringToHex } = require(VIEM_PATH);
 
 const DOSSIER_DIR = `${WORKDIR}/dossiers`;
 
@@ -134,7 +133,6 @@ async function main() {
   // evidence submissions + their IPFS CIDs for a dispute correctly across
   // resolvers. The previous hand-rolled event scraping matched no events on
   // this resolver and always returned zero evidence files.
-  const EVIDENCE_CHAIN = "arbitrum-one"; // matches the hardcoded CORE/DISPUTERESOLVER constants above
   const cidFromUri = (u) => {
     const m = String(u || "").match(/(?:ipfs:\/\/|ipfs\/)?(Qm[1-9A-HJ-NP-Za-km-z]{44}|baf[a-z0-9]{20,})/);
     return m ? m[1] : null;

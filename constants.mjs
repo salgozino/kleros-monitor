@@ -1,5 +1,5 @@
 // Single source of truth for all shared constants in kleros-monitor.
-// All 16 named constants are exported below.
+// All 17 named constants are exported below.
 
 import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
@@ -29,6 +29,7 @@ export const IPFS_GATEWAYS = [
   "https://ipfs.io/ipfs/",
   "https://gateway.pinata.cloud/ipfs/",
 ];
+export const EVIDENCE_CHAIN = "arbitrum-one"; // chain name for `kleros evidence list --chain`
 
 // ----- on-chain identifiers -----
 export const COURT_ID = 34n;
