@@ -303,9 +303,43 @@ async function main() {
 // Same view twice in a row -> silent no-op tick (no agent, no tokens).
 // Any transition (new draw, commit->vote, vote->appeal, ruled) -> agent wakes.
 function renderGateView(fresh) {
-  const lines = fresh.map((g) =>
-    `dispute=${g.disputeID} round=${g.roundID} period=${g.dispute?.period ?? "?"} ruled=${g.dispute?.ruled ? 1 : 0}`
-  );
+  const lines = fresh.map((g) => {
+    const period = g.dispute?.period ?? "?";
+    const ruled = g.dispute?.ruled ? 1 : 0;
+    // While a draw is in an active voting period (commit=1 / vote=2) and the
+    // Fase B output (decision.json) is still missing, keep re-waking the agent
+    // on a fixed cadence so a transient LLM/provider failure (e.g. HTTP 503)
+    // cannot strand the dispute. The `retry` suffix rotates every 5 minutes
+    // (deterministic, no per-second timestamp) so the gate hash changes roughly
+    // once per window, forcing a re-run, but stays stable enough to avoid
+    // spending tokens every single tick. Once decision.json exists the suffix
+    // becomes `done` and the view stabilizes -> agent suppressed (work done).
+    const dir = `${WORKDIR}/dossiers/${g.disputeID}-r${g.roundID}`;
+    const hasDecision = existsSync(`${dir}/decision.json`);
+    // A draw is "work pending" (keep re-waking the agent) while EITHER:
+    //   - it is in commit/vote (period 1/2) and Fase B (decision.json) is
+    //     still missing, OR
+    //   - it is in evidence (period 0) and the dossier is not yet built
+    //     (no manifest, or chunkCount===0) so Fase A (download) must retry.
+    // The `retry` suffix rotates every 5 minutes (deterministic, no per-second
+    // timestamp) so the gate hash changes roughly once per window, forcing a
+    // re-run, but stays stable enough to avoid spending tokens every tick.
+    // Once the relevant work is done the suffix becomes `done` and the view
+    // stabilizes -> agent suppressed (work done).
+    const manifestPath = `${dir}/manifest.json`;
+    let dossierBuilt = false;
+    if (existsSync(manifestPath)) {
+      try {
+        const m = JSON.parse(readFileSync(manifestPath, "utf8"));
+        dossierBuilt = (m.chunkCount || 0) > 0;
+      } catch { dossierBuilt = false; }
+    }
+    const faseAPending = period === 0 && !dossierBuilt;
+    const faseBPending = (period === 1 || period === 2) && !hasDecision;
+    const pending = faseAPending || faseBPending;
+    const retry = pending ? ` retry=${Math.floor(Date.now() / 300000) % 1000}` : " done";
+    return `dispute=${g.disputeID} round=${g.roundID} period=${period} ruled=${ruled}${retry}`;
+  });
   lines.sort();
   return lines.join("\n");
 }
