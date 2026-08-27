@@ -23,8 +23,12 @@
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 
+import { PNK, CORE, SORT, COURT_ID, KEY_PATH, RPC_URLS, VIEM_PATH } from "./constants.mjs";
+import ERC20_ABI from "./abis/erc20.mjs";
+import CORE_ABI from "./abis/core.mjs";
+import SORT_ABI from "./abis/sortition.mjs";
+
 const require = createRequire(import.meta.url);
-const VIEM = "/usr/local/lib/node_modules/kleros-juror-cli/node_modules/viem";
 const {
   createPublicClient,
   createWalletClient,
@@ -32,35 +36,9 @@ const {
   parseUnits,
   formatUnits,
   encodeFunctionData,
-} = require(VIEM);
-const { privateKeyToAccount } = require(`${VIEM}/accounts`);
-const { arbitrum } = require(`${VIEM}/chains`);
-
-const RPC_URL = "https://arb1.arbitrum.io/rpc";
-const PNK = "0x330bD769382cFc6d50175903434CCC8D206DCAE5";
-const CORE = "0x991d2df165670b9cac3B022f4B68D65b664222ea";
-const SORT = "0x21A9402aDb818744B296e1d1BE58C804118DC03D";
-const COURT_ID = 34n;
-const KEY_PATH = "/root/.kleros-juror/key";
-
-const ERC20_ABI = [
-  { type: "function", name: "approve", stateMutability: "nonpayable",
-    inputs: [{ name: "spender", type: "address" }, { name: "amount", type: "uint256" }],
-    outputs: [{ type: "bool" }] },
-  { type: "function", name: "allowance", stateMutability: "view",
-    inputs: [{ name: "owner", type: "address" }, { name: "spender", type: "address" }],
-    outputs: [{ type: "uint256" }] },
-  { type: "function", name: "balanceOf", stateMutability: "view",
-    inputs: [{ name: "account", type: "address" }], outputs: [{ type: "uint256" }] },
-];
-const CORE_ABI = [
-  { type: "function", name: "setStake", stateMutability: "nonpayable",
-    inputs: [{ name: "_courtID", type: "uint96" }, { name: "_newStake", type: "uint256" }],
-    outputs: [] },
-];
-const SORT_ABI = [
-  { type: "function", name: "phase", stateMutability: "view", inputs: [], outputs: [{ type: "uint8" }] },
-];
+} = require(VIEM_PATH);
+const { privateKeyToAccount } = require(`${VIEM_PATH}/accounts`);
+const { arbitrum } = require(`${VIEM_PATH}/chains`);
 
 function parseArgs(argv) {
   const out = { broadcast: false, amount: null };
@@ -83,8 +61,9 @@ async function main() {
   const rawKey = readFileSync(KEY_PATH, "utf8").trim();
   const account = privateKeyToAccount(rawKey);
 
-  const publicClient = createPublicClient({ chain: arbitrum, transport: http(RPC_URL) });
-  const walletClient = createWalletClient({ account, chain: arbitrum, transport: http(RPC_URL) });
+  const rpcUrl = RPC_URLS[0]; // use official endpoint for wallet operations
+  const publicClient = createPublicClient({ chain: arbitrum, transport: http(rpcUrl) });
+  const walletClient = createWalletClient({ account, chain: arbitrum, transport: http(rpcUrl) });
 
   const [pnkBalance, allowance, phase] = await Promise.all([
     publicClient.readContract({ address: PNK, abi: ERC20_ABI, functionName: "balanceOf", args: [account.address] }),

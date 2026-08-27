@@ -40,21 +40,12 @@
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { createRequire } from "node:module";
 
-const require = createRequire(import.meta.url);
-const VIEM = "/usr/local/lib/node_modules/kleros-juror-cli/node_modules/viem";
-const { encodeFunctionData, decodeFunctionResult } = require(VIEM);
+import { CORE, JUROR, WORKDIR } from "./constants.mjs";
+import { loadState } from "./helpers/state.mjs";
 
-const WORKDIR = "/root/kleros-monitor";
 // Broadcast is controlled by env var (scheduler passes no CLI args reliably).
 const BROADCAST = process.env.PHASE_C_BROADCAST === "1";
-
-const CORE = "0x991d2df165670b9cac3B022f4B68D65b664222ea";
-const JUROR = "0x606D2DD4Ca178349b327Ed7ACacf68058bd748Bc".toLowerCase();
-// Derived from JUROR (not hardcoded) so it can never drift out of sync with
-// monitor.mjs's own STATE_FILE if the juror address ever changes.
-const STATE_FILE = `${WORKDIR}/state-${JUROR.slice(2, 10)}.json`;
 
 function log(msg) {
   // Write ONLY to the log file, never stdout — the cron scheduler delivers
@@ -65,10 +56,6 @@ function log(msg) {
     mkdirSync(`${WORKDIR}/logs`, { recursive: true });
     writeFileSync(`${WORKDIR}/logs/phase-c.log`, line + "\n", { flag: "a" });
   } catch {}
-}
-
-function loadState() {
-  try { return JSON.parse(readFileSync(STATE_FILE, "utf8")); } catch { return null; }
 }
 
 // Reads dossiers/D-R/decision.json -> { dispute, round, choice }. Votes are

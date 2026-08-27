@@ -20,64 +20,15 @@ import { mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync, statSy
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 
+import { CORE, DISPUTERESOLVER, DRT, RPC_URLS, IPFS_GATEWAYS, WORKDIR, VIEM_PATH } from "./constants.mjs";
+import { rpcWithRetry, getLogs } from "./helpers/rpc.mjs";
+import { fetchIpfs } from "./helpers/ipfs.mjs";
+import { sleep } from "./helpers/utils.mjs";
+
 const require = createRequire(import.meta.url);
-const VIEM = "/usr/local/lib/node_modules/kleros-juror-cli/node_modules/viem";
-const { keccak256, stringToHex } = require(VIEM);
+const { keccak256, stringToHex } = require(VIEM_PATH);
 
-const CORE = "0x991d2df165670b9cac3B022f4B68D65b664222ea"; // KlerosCore proxy Arbitrum One
-const DISPUTERESOLVER = "0xb5526d022962a1fff6ed32c93e8b714c901f4323";
-const DRT = "0x0cFBaCA5C72e7Ca5fFABE768E135654fB3F2a5A2"; // DisputeTemplateRegistry
-const RPC_URLS = ["https://arb1.arbitrum.io/rpc", "https://arbitrum-one-rpc.publicnode.com"];
-const IPFS_GATEWAYS = [
-  "https://cdn.kleros.link/ipfs/", // Kleros gateway (IPFS_GATEWAY in kleros-v2 web)
-  "https://ipfs.io/ipfs/",
-  "https://gateway.pinata.cloud/ipfs/",
-];
-const WORKDIR = "/root/kleros-monitor/dossiers";
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-async function rpc(method, params, attempts = 3) {
-  let lastErr;
-  for (let i = 0; i < attempts; i++) {
-    for (const url of RPC_URLS) {
-      try {
-        const res = await fetch(url, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ jsonrpc: "2.0", id: Date.now(), method, params }),
-          signal: AbortSignal.timeout(20_000),
-        });
-        const j = await res.json();
-        if (j.error) throw new Error(j.error.message || JSON.stringify(j.error));
-        return j.result;
-      } catch (e) { lastErr = e; }
-    }
-    await sleep(1500 * (i + 1));
-  }
-  throw lastErr;
-}
-
-async function getLogs(filter) {
-  let lastErr;
-  for (let i = 0; i < 3; i++) {
-    try { return await rpc("eth_getLogs", [filter]); } catch (e) { lastErr = e; await sleep(2000); }
-  }
-  throw lastErr;
-}
-
-async function fetchIpfs(cid, destPath) {
-  for (const gw of IPFS_GATEWAYS) {
-    try {
-      const res = await fetch(gw + cid, { signal: AbortSignal.timeout(60_000) });
-      if (!res.ok) continue;
-      const buf = Buffer.from(await res.arrayBuffer());
-      writeFileSync(destPath, buf);
-      return buf.length;
-    } catch { /* next gateway */ }
-  }
-  return 0;
-}
+const DOSSIER_DIR = `${WORKDIR}/dossiers`;
 
 // Extract text from a file based on its type. Returns { text, meta } or null.
 function extractText(filePath, mime) {
@@ -122,7 +73,7 @@ async function main() {
   const [disputeID, roundArg] = process.argv.slice(2);
   if (!disputeID) { console.error("usage: dossier-builder.mjs <disputeID> [round]"); process.exit(1); }
 
-  const dir = `${WORKDIR}/${disputeID}-r${roundArg ?? 0}`;
+  const dir = `${DOSSIER_DIR}/${disputeID}-r${roundArg ?? 0}`;
   mkdirSync(`${dir}/evidence`, { recursive: true });
   mkdirSync(`${dir}/chunks`, { recursive: true });
 
@@ -131,7 +82,7 @@ async function main() {
   // ---- 1. Template: find the dispute CREATION tx via DisputeCreation event
   // (the Draw event fires in a later tx; the template lives in the creation
   // receipt, as observed on dispute #163).
-  const headHex = await rpc("eth_blockNumber", []);
+  const headHex = await rpcWithRetry("eth_blockNumber", []);
   const head = parseInt(headHex, 16);
   const fromBlock = "0x" + Math.max(0, head - 3_000_000).toString(16); // ~10 days
 
@@ -145,7 +96,7 @@ async function main() {
   if (!creationLogs.length) { console.error(`no creation event found for dispute ${disputeID} in last ~10 days`); process.exit(2); }
   const txHash = creationLogs[0].transactionHash;
 
-  const receipt = await rpc("eth_getTransactionReceipt", [txHash]);
+  const receipt = await rpcWithRetry("eth_getTransactionReceipt", [txHash]);
   manifest.sources.push({ type: "creationTx", hash: txHash });
 
   // NewTemplate(uint256 indexed _templateId, address indexed owner, string tag, string data)

@@ -4,11 +4,10 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
+import { VIEM_PATH } from "./constants.mjs";
 
 const require = createRequire(import.meta.url);
-const { privateKeyToAccount } = require(
-  "/usr/local/lib/node_modules/kleros-juror-cli/node_modules/viem/accounts",
-);
+const { privateKeyToAccount } = require(VIEM_PATH + "/accounts");
 
 const home = process.env.KLEROS_JUROR_HOME || join(homedir(), ".kleros-juror");
 const raw = readFileSync(join(home, "key"), "utf8").trim();

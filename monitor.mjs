@@ -13,120 +13,29 @@
 //
 // Safety: never touches the private key, never broadcasts anything. Read-only.
 
-import { existsSync, readFileSync, writeFileSync, renameSync, openSync, closeSync, statSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import { createRequire } from "node:module";
 
+import { CORE, JUROR, RPC_URLS, TOPIC_DRAW, WORKDIR, PERIOD_NAMES, VIEM_PATH,
+         INIT_LOOKBACK_BLOCKS, BLOCKS_PER_DAY } from "./constants.mjs";
+import ROUND_ABI from "./abis/round.mjs";
+import { rpc, rpcAny, rpcWithRetry, getLogs } from "./helpers/rpc.mjs";
+import { loadState, saveState, acquireLock, releaseLock } from "./helpers/state.mjs";
+import { sleep, fmtDate, hex } from "./helpers/utils.mjs";
+
 const execFile = promisify(execFileCb);
 
 const require = createRequire(import.meta.url);
-const VIEM = "/usr/local/lib/node_modules/kleros-juror-cli/node_modules/viem";
-const { encodeFunctionData, decodeFunctionResult } = require(VIEM);
+const { encodeFunctionData, decodeFunctionResult } = require(VIEM_PATH);
 
 // ---------------------------------------------------------------- config ---
 // KLEROS_JUROR_ADDRESS exists ONLY for testing (simulate another juror).
-const JUROR = (process.env.KLEROS_JUROR_ADDRESS || "0x606D2DD4Ca178349b327Ed7ACacf68058bd748Bc").toLowerCase(); // derived from ~/.kleros-juror/key (address.js)
-const CORE = "0x991d2df165670b9cac3B022f4B68D65b664222ea"; // KlerosCore proxy, Arbitrum One
-const TOPIC_DRAW = "0x6119cf536152c11e0a9a6c22f3953ce4ecc93ee54fa72ffa326ffabded21509b"; // keccak(Draw(address,uint256,uint256,uint256))
-const RPC_URLS = [
-  "https://arb1.arbitrum.io/rpc", // official; generous getLogs ranges
-  "https://arbitrum-one-rpc.publicnode.com", // rejects old ranges without token
-];
-const WORKDIR = "/root/kleros-monitor";
-// State is per-juror so test runs with KLEROS_JUROR_ADDRESS never touch real state.
-const STATE_FILE = `${WORKDIR}/state-${JUROR.slice(2, 10)}.json`;
-const LOCK_FILE = `/tmp/kleros-draw-monitor-${JUROR.slice(2, 10)}.lock`;
-const INIT_LOOKBACK_BLOCKS = Number(process.env.INIT_LOOKBACK_BLOCKS || 5_000_000); // ~2 weeks on Arbitrum
-const BLOCKS_PER_DAY = 345_600; // ~250 ms/block, only used for hints
-const PERIOD_NAMES = ["evidence", "commit", "vote", "appeal", "execution"];
-
-// ---------------------------------------------------------------- state ----
-function loadState() {
-  if (!existsSync(STATE_FILE)) return null;
-  try { return JSON.parse(readFileSync(STATE_FILE, "utf8")); } catch { return null; }
-}
-function saveState(st) {
-  const tmp = STATE_FILE + ".tmp";
-  writeFileSync(tmp, JSON.stringify(st));
-  renameSync(tmp, STATE_FILE);
-}
-
-// Single-instance lock (stale locks older than 10 min are removed).
-let lockFd = null;
-function acquireLock() {
-  try {
-    lockFd = openSync(LOCK_FILE, "wx");
-  } catch {
-    let age = Infinity;
-    try { age = Date.now() - statSync(LOCK_FILE).mtimeMs; } catch {}
-    if (age < 600_000) process.exit(0); // another run is alive; stay silent
-    try { unlinkSync(LOCK_FILE); } catch {}
-    try { lockFd = openSync(LOCK_FILE, "wx"); } catch { process.exit(0); }
-  }
-}
-
-// ------------------------------------------------------------- json rpc ----
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-async function rpc(endpoint, method, params, timeoutMs = 20_000) {
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), timeoutMs);
-  try {
-    const res = await fetch(endpoint, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      signal: ctrl.signal,
-      body: JSON.stringify({ jsonrpc: "2.0", id: Date.now(), method, params }),
-    });
-    const text = await res.text();
-    let j;
-    try { j = JSON.parse(text); } catch { throw new Error(`non-JSON response from ${endpoint}: ${text.slice(0, 80)}`); }
-    if (j.error) throw new Error(`rpc ${method}: ${j.error.message || JSON.stringify(j.error)}`);
-    return j.result;
-  } finally { clearTimeout(t); }
-}
-
-// Tries every endpoint until one answers.
-async function rpcAny(method, params) {
-  let lastErr;
-  for (const url of RPC_URLS) {
-    try { return await rpc(url, method, params); } catch (e) { lastErr = e; }
-  }
-  throw lastErr ?? new Error("all RPC endpoints failed");
-}
-
-async function rpcWithRetry(method, params, attempts = 3) {
-  let lastErr;
-  for (let i = 0; i < attempts; i++) {
-    try { return await rpcAny(method, params); } catch (e) { lastErr = e; await sleep(1500 * (i + 1)); }
-  }
-  throw lastErr;
-}
-
-const hex = (n) => "0x" + n.toString(16);
+const juror = (process.env.KLEROS_JUROR_ADDRESS || JUROR).toLowerCase(); // derived from ~/.kleros-juror/key (address.mjs)
+const initLookback = Number(process.env.INIT_LOOKBACK_BLOCKS || INIT_LOOKBACK_BLOCKS);
 
 // --------------------------------------------------------- chain reads -----
-const ROUND_ABI = [{
-  type: "function", name: "getRoundInfo", stateMutability: "view",
-  inputs: [{ type: "uint256" }, { type: "uint256" }],
-  outputs: [{
-    name: "", type: "tuple", components: [
-      { name: "disputeKitID", type: "uint256" },
-      { name: "pnkAtStakePerJuror", type: "uint256" },
-      { name: "totalFeesForJurors", type: "uint256" },
-      { name: "nbVotes", type: "uint256" },
-      { name: "repartitions", type: "uint256" },
-      { name: "pnkPenalties", type: "uint256" },
-      { name: "drawnJurors", type: "address[]" },
-      { name: "sumFeeRewardPaid", type: "uint256" },
-      { name: "sumPnkRewardPaid", type: "uint256" },
-      { name: "feeToken", type: "address" },
-      { name: "drawIterations", type: "uint256" },
-    ],
-  }],
-}];
-
 async function getRoundInfo(disputeID, round) {
   const data = encodeFunctionData({ abi: ROUND_ABI, args: [BigInt(disputeID), BigInt(round)] });
   const res = await rpcWithRetry("eth_call", [{ to: CORE, data }, "latest"]);
@@ -137,7 +46,7 @@ async function getRoundInfo(disputeID, round) {
 // (uint96 courtID, address arbitrated, uint8 period, bool ruled, uint256 lastPeriodChange)
 // (the dynamic Round[] tail is truncated out by the ABI encoder for this accessor shape)
 async function getDisputeHeader(disputeID) {
-  const { keccak256, stringToHex } = require(VIEM);
+  const { keccak256, stringToHex } = require(VIEM_PATH);
   const sel = keccak256(stringToHex("disputes(uint256)")).slice(0, 10);
   const arg = BigInt(disputeID).toString(16).padStart(64, "0");
   const res = await rpcWithRetry("eth_call", [{ to: CORE, data: sel + arg }, "latest"]);
@@ -160,7 +69,7 @@ async function fetchDrawLogs(fromBlock, toBlock) {
     address: CORE,
     topics: [
       TOPIC_DRAW,
-      "0x" + JUROR.toLowerCase().replace(/^0x/, "").padStart(64, "0"), // our address
+      "0x" + juror.toLowerCase().replace(/^0x/, "").padStart(64, "0"), // our address
       null, // any dispute
     ],
     fromBlock: hex(fromBlock),
@@ -227,10 +136,6 @@ async function enrichViaAgentkit(disputeID) {
   }
 }
 
-function fmtDate(tsSec) {
-  return new Date(Number(tsSec) * 1000).toISOString().replace("T", " ").slice(0, 16) + " UTC";
-}
-
 function renderAlert(groups, isNewMap, opts = {}) {
   const lines = [];
   lines.push("⚖️ SORTEO EN KLEROS COURT V2 ⚖️");
@@ -291,12 +196,12 @@ async function main() {
   let firstRun = false;
   if (!state) {
     firstRun = true;
-    state = { lastBlock: Math.max(0, head - INIT_LOOKBACK_BLOCKS), seen: {} };
+    state = { lastBlock: Math.max(0, head - initLookback), seen: {} };
   }
 
   // Status mode is read-only: report what we already know, enriched live.
   if (statusOnly) {
-    console.log(`# kleros-draw-monitor · juror ${JUROR}`);
+    console.log(`# kleros-draw-monitor · juror ${juror}`);
     console.log(`# bloque escaneado hasta: ${state.lastBlock} | head actual: ${head}`);
     const keys = Object.keys(state.seen);
     console.log(`# sorteos conocidos: ${keys.length}`);
@@ -332,7 +237,7 @@ async function main() {
     // Derive our vote IDs from drawnJurors order (authoritative).
     const derived = [];
     (roundInfo.drawnJurors || []).forEach((addr, i) => {
-      if (addr.toLowerCase() === JUROR.toLowerCase()) derived.push(i);
+      if (addr.toLowerCase() === juror.toLowerCase()) derived.push(i);
     });
     g.voteIDs = derived.length ? derived : [...g.voteSet].sort((a, b) => a - b);
     g.nbVotes = Number(roundInfo.nbVotes);
@@ -451,6 +356,5 @@ main()
   })
   .finally(() => {
     // Release the single-instance lock no matter how the run ended.
-    try { closeSync(lockFd); } catch {}
-    try { unlinkSync(LOCK_FILE); } catch {}
+    releaseLock();
   });
