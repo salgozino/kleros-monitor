@@ -398,9 +398,23 @@ async function main() {
 // Same view twice in a row -> silent no-op tick (no agent, no tokens).
 // Any transition (new draw, commit->vote, vote->appeal, ruled) -> agent wakes.
 function renderGateView(fresh) {
-  const lines = fresh.map((g) =>
-    `dispute=${g.disputeID} round=${g.roundID} period=${g.dispute?.period ?? "?"} ruled=${g.dispute?.ruled ? 1 : 0}`
-  );
+  const lines = fresh.map((g) => {
+    const period = g.dispute?.period ?? "?";
+    const ruled = g.dispute?.ruled ? 1 : 0;
+    // While a draw is in an active voting period (commit=1 / vote=2) and the
+    // Fase B output (decision.json) is still missing, keep re-waking the agent
+    // on a fixed cadence so a transient LLM/provider failure (e.g. HTTP 503)
+    // cannot strand the dispute. The `retry` suffix rotates every 5 minutes
+    // (deterministic, no per-second timestamp) so the gate hash changes roughly
+    // once per window, forcing a re-run, but stays stable enough to avoid
+    // spending tokens every single tick. Once decision.json exists the suffix
+    // becomes `done` and the view stabilizes -> agent suppressed (work done).
+    const dir = `${WORKDIR}/dossiers/${g.disputeID}-r${g.roundID}`;
+    const hasDecision = existsSync(`${dir}/decision.json`);
+    const pending = (period === 1 || period === 2) && !hasDecision;
+    const retry = pending ? ` retry=${Math.floor(Date.now() / 300000) % 1000}` : " done";
+    return `dispute=${g.disputeID} round=${g.roundID} period=${period} ruled=${ruled}${retry}`;
+  });
   lines.sort();
   return lines.join("\n");
 }
