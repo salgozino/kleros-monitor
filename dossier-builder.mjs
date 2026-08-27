@@ -1,0 +1,266 @@
+#!/usr/bin/env node
+// dossier-builder.mjs — deterministic (NO LLM) evidence extraction for a dispute.
+// Called by the cron agent (or manually) when we are drawn in a case:
+//   node dossier-builder.mjs <disputeID> <roundID>
+//
+// Pipeline:
+//   1. Read the dispute template + evidence URIs from on-chain events.
+//   2. Download IPFS artifacts (template JSON, evidence files incl. PDFs).
+//   3. Extract text from PDFs/images metadata into plain-text chunks.
+//   4. Write /root/kleros-monitor/dossiers/<dispute>-r<round>/ with:
+//        template.json     - resolution criteria, options, policy
+//        evidence/         - raw downloaded files
+//        chunks/chunk-NNN.txt - ~4000-char text pieces for LLM ticks
+//        manifest.json     - what was extracted, chunk count, sources
+//
+// Everything here is mechanical: no reasoning, no token cost. The 1-hour
+// script timeout of Hermes cron covers even huge PDFs comfortably.
+
+import { mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const VIEM = "/usr/local/lib/node_modules/kleros-juror-cli/node_modules/viem";
+const { keccak256, stringToHex } = require(VIEM);
+
+const CORE = "0x991d2df165670b9cac3B022f4B68D65b664222ea"; // KlerosCore proxy Arbitrum One
+const DISPUTERESOLVER = "0xb5526d022962a1fff6ed32c93e8b714c901f4323";
+const DRT = "0x0cFBaCA5C72e7Ca5fFABE768E135654fB3F2a5A2"; // DisputeTemplateRegistry
+const RPC_URLS = ["https://arb1.arbitrum.io/rpc", "https://arbitrum-one-rpc.publicnode.com"];
+const IPFS_GATEWAYS = [
+  "https://cdn.kleros.link/ipfs/", // Kleros gateway (IPFS_GATEWAY in kleros-v2 web)
+  "https://ipfs.io/ipfs/",
+  "https://gateway.pinata.cloud/ipfs/",
+];
+const WORKDIR = "/root/kleros-monitor/dossiers";
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function rpc(method, params, attempts = 3) {
+  let lastErr;
+  for (let i = 0; i < attempts; i++) {
+    for (const url of RPC_URLS) {
+      try {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ jsonrpc: "2.0", id: Date.now(), method, params }),
+          signal: AbortSignal.timeout(20_000),
+        });
+        const j = await res.json();
+        if (j.error) throw new Error(j.error.message || JSON.stringify(j.error));
+        return j.result;
+      } catch (e) { lastErr = e; }
+    }
+    await sleep(1500 * (i + 1));
+  }
+  throw lastErr;
+}
+
+async function getLogs(filter) {
+  let lastErr;
+  for (let i = 0; i < 3; i++) {
+    try { return await rpc("eth_getLogs", [filter]); } catch (e) { lastErr = e; await sleep(2000); }
+  }
+  throw lastErr;
+}
+
+async function fetchIpfs(cid, destPath) {
+  for (const gw of IPFS_GATEWAYS) {
+    try {
+      const res = await fetch(gw + cid, { signal: AbortSignal.timeout(60_000) });
+      if (!res.ok) continue;
+      const buf = Buffer.from(await res.arrayBuffer());
+      writeFileSync(destPath, buf);
+      return buf.length;
+    } catch { /* next gateway */ }
+  }
+  return 0;
+}
+
+// Extract text from a file based on its type. Returns { text, meta } or null.
+function extractText(filePath, mime) {
+  const head = readFileSync(filePath).subarray(0, 16);
+  const isPdf = head.subarray(0, 4).toString() === "%PDF";
+  const isPng = head[0] === 0x89 && head[1] === 0x50;
+  const isJpg = head[0] === 0xff && head[1] === 0xd8;
+
+  if (isPdf || filePath.endsWith(".pdf")) {
+    // pdftotext ships with poppler-utils; fall back to python pymupdf.
+    try {
+      const txt = execFileSync("pdftotext", ["-layout", filePath, "-"], { timeout: 120_000, maxBuffer: 64 * 1024 * 1024 });
+      return { text: txt.toString(), extractor: "pdftotext" };
+    } catch {
+      try {
+        const py = `import fitz,sys;d=fitz.open(sys.argv[1]);print("\\n".join(p.get_text() for p in d))`;
+        const txt = execFileSync("python3", ["-c", py, filePath], { timeout: 180_000, maxBuffer: 64 * 1024 * 1024 });
+        return { text: txt.toString(), extractor: "pymupdf" };
+      } catch (e2) {
+        return { text: `[PDF binary, ${filePath}: text extraction failed (${e2.message.slice(0, 80)})]`, extractor: "failed" };
+      }
+    }
+  }
+  if ((isPng || isJpg) && mime?.startsWith("image")) {
+    // Images can't be text-extracted here; note them so the agent knows to
+    // look at the original URI if needed (vision analysis is out of scope).
+    const kb = Math.ceil(require("node:fs").statSync(filePath).size / 1024);
+    return { text: `[image file ${filePath}, ${kb} KB - see original at the listed URI]`, extractor: "image-note" };
+  }
+  // Try as text
+  try {
+    const txt = readFileSync(filePath, "utf8");
+    // Heuristic: mostly printable?
+    const sample = txt.slice(0, 2000);
+    const printable = [...sample].filter((c) => c.charCodeAt(0) >= 32 || c === "\n").length / Math.max(1, sample.length);
+    if (printable > 0.9) return { text: txt, extractor: "utf8" };
+  } catch {}
+  return null;
+}
+
+async function main() {
+  const [disputeID, roundArg] = process.argv.slice(2);
+  if (!disputeID) { console.error("usage: dossier-builder.mjs <disputeID> [round]"); process.exit(1); }
+
+  const dir = `${WORKDIR}/${disputeID}-r${roundArg ?? 0}`;
+  mkdirSync(`${dir}/evidence`, { recursive: true });
+  mkdirSync(`${dir}/chunks`, { recursive: true });
+
+  const manifest = { disputeID, round: Number(roundArg ?? 0), builtAt: new Date().toISOString(), sources: [], files: [], warnings: [] };
+
+  // ---- 1. Template: find the dispute CREATION tx via DisputeCreation event
+  // (the Draw event fires in a later tx; the template lives in the creation
+  // receipt, as observed on dispute #163).
+  const headHex = await rpc("eth_blockNumber", []);
+  const head = parseInt(headHex, 16);
+  const fromBlock = "0x" + Math.max(0, head - 3_000_000).toString(16); // ~10 days
+
+  const DISPUTE_CREATION_TOPIC = "0x141dfc18aa6a56fc816f44f0e9e2f1ebc92b15ab167770e17db5b084c10ed995"; // keccak(DisputeCreation(uint256,address))
+  const creationLogs = await getLogs({
+    address: CORE,
+    topics: [DISPUTE_CREATION_TOPIC, "0x" + BigInt(disputeID).toString(16).padStart(64, "0")],
+    fromBlock,
+    toBlock: "latest",
+  });
+  if (!creationLogs.length) { console.error(`no creation event found for dispute ${disputeID} in last ~10 days`); process.exit(2); }
+  const txHash = creationLogs[0].transactionHash;
+
+  const receipt = await rpc("eth_getTransactionReceipt", [txHash]);
+  manifest.sources.push({ type: "creationTx", hash: txHash });
+
+  // NewTemplate(uint256 indexed _templateId, address indexed owner, string tag, string data)
+  const NEW_TEMPLATE_TOPIC = "0x00f7cd7255d1073b4e136dd477c38ea0020c051ab17110cc5bfab0c840ff9924";
+  const tplLog = (receipt.logs || []).find((l) => l.address.toLowerCase() === DRT.toLowerCase() && l.topics[0] === NEW_TEMPLATE_TOPIC);
+  if (tplLog) {
+    const d = Buffer.from(tplLog.data.replace(/^0x/, ""), "hex");
+    const offTag = Number(BigInt("0x" + d.subarray(0, 32).toString("hex")));
+    const offData = Number(BigInt("0x" + d.subarray(32, 64).toString("hex")));
+    const readStr = (off) => {
+      const len = Number(BigInt("0x" + d.subarray(off, off + 32).toString("hex")));
+      return d.subarray(off + 32, off + 32 + len).toString("utf8");
+    };
+    const s1 = readStr(offTag);
+    const s2 = offData ? readStr(offData) : "";
+    // Field order varies by registry version: pick whichever string parses as
+    // a JSON template (has "question"); fall back to the non-empty one.
+    let parsed = null;
+    for (const cand of [s1, s2]) {
+      try {
+        const p = JSON.parse(cand);
+        if (p && typeof p === "object" && ("question" in p || "title" in p || "answers" in p)) { parsed = p; break; }
+      } catch {}
+    }
+    writeFileSync(`${dir}/template.json`, JSON.stringify(parsed ?? (s1.length >= s2.length ? s1 : s2), null, 2));
+    // The other string (or empty) is the human tag.
+    writeFileSync(`${dir}/template-tag.txt`, s1.length <= s2.length ? s1 : s2);
+    manifest.templateId = Number(BigInt(tplLog.topics[1]));
+    manifest.files.push({ path: "template.json", kind: "resolution-criteria" });
+  } else {
+    manifest.warnings.push("NewTemplate event not found in creation receipt — template must be fetched manually");
+  }
+
+  // Evidence: EvidenceModule or arbitrated contract emits evidence events.
+  // Generic approach: pull ALL logs of this tx's arbitrated contract around
+  // the dispute id is unreliable; instead scan the arbitrable contract's logs
+  // in a window after creation for evidence submissions referencing our
+  // dispute via its local dispute id. Best-effort: collect recent logs.
+  const EVIDENCE_TOPICS = [
+    keccak256(stringToHex("Evidence(address,uint256,string)")), // ERC-792 style
+  ];
+  const evLogs = await getLogs({ address: DISPUTERESOLVER, topics: [EVIDENCE_TOPICS[0], null], fromBlock, toBlock: "latest" }).catch(() => []);
+  let idx = 0;
+  for (const lg of evLogs) {
+    // data: uint256 disputeId(local), string evidenceURI
+    const d = Buffer.from(lg.data.replace(/^0x/, ""), "hex");
+    if (d.length < 128) continue;
+    const localId = Number(BigInt("0x" + d.subarray(0, 32).toString("hex")));
+    // Local id mapping differs per contract; accept anything and record it.
+    const offStr = Number(BigInt("0x" + d.subarray(32, 64).toString("hex")));
+    if (!offStr || offStr + 64 > d.length) continue;
+    const lenStr = Number(BigInt("0x" + d.subarray(offStr, offStr + 32).toString("hex")));
+    const uriRaw = d.subarray(offStr + 32, offStr + 32 + lenStr).toString("utf8").replace(/\0+$/g, "");
+    const m = uriRaw.match(/(?:ipfs:\/\/|ipfs\/)?(Qm[1-9A-HJ-NP-Za-km-z]{44}|baf[a-z0-9]{20,})/);
+    if (!m) continue;
+    const cid = m[1];
+    const fname = `${dir}/evidence/ev-${String(idx++).padStart(3, "0")}-${cid.slice(0, 10)}`;
+    const size = await fetchIpfs(cid, fname);
+    manifest.sources.push({ type: "evidence", cid, bytes: size, uri: uriRaw.slice(0, 120), localDisputeId: localId });
+    if (!size) manifest.warnings.push(`could not fetch evidence CID ${cid}`);
+    await sleep(300);
+  }
+
+  // ---- 4. Chunking (~4000 chars each) -------------------------------------
+  let chunkIdx = 0;
+  const CHUNK = 4000;
+  const texts2 = [];
+
+  // Template goes FIRST so the agent reads resolution criteria before evidence.
+  try {
+    const tpl = readFileSync(`${dir}/template.json`, "utf8");
+    if (tpl.trim() && tpl !== '""') texts2.push({ file: "template.json (CRITERIOS DE RESOLUCIÓN - LEER PRIMERO)", extractor: "json", text: tpl });
+  } catch {}
+
+  // Policy URI from the template (court policy).
+  try {
+    const parsed = JSON.parse(readFileSync(`${dir}/template.json`, "utf8"));
+    const m = (parsed.policyURI || "").match(/(?:ipfs:\/\/|\/ipfs\/)?(Qm[1-9A-HJ-NP-Za-km-z]{44}|baf[a-z0-9]{20,})/);
+    if (m) {
+      const psize = await fetchIpfs(m[1], `${dir}/evidence/policy-${m[1].slice(0, 10)}`);
+      manifest.sources.push({ type: "policy", cid: m[1], bytes: psize });
+      if (!psize) manifest.warnings.push(`could not fetch policy CID ${m[1]}`);
+    }
+  } catch {}
+
+  for (const f of readdirSync(`${dir}/evidence`)) {
+    const p = `${dir}/evidence/${f}`;
+    if (!statSync(p).isFile()) continue;
+    const res = extractText(p);
+    if (res) texts2.push({ file: f, ...res });
+  }
+
+  for (const t of texts2) {
+    if ((t.extractor === "failed" || !t.text || !t.text.trim())) { manifest.warnings.push(`no text extracted from ${t.file}`); continue; }
+    const header = `\n===== SOURCE: ${t.file} (${t.extractor}) =====\n`;
+    const body = header + t.text;
+    for (let i = 0; i < body.length; i += CHUNK) {
+      writeFileSync(`${dir}/chunks/chunk-${String(chunkIdx).padStart(3, "0")}.txt`,
+        `chunk ${chunkIdx} | source ${t.file} | part ${Math.floor(i / CHUNK) + 1}\n\n${body.slice(i, i + CHUNK)}`);
+      chunkIdx++;
+    }
+  }
+  manifest.chunkCount = chunkIdx;
+
+  writeFileSync(`${dir}/manifest.json`, JSON.stringify(manifest, null, 2));
+
+  // stdout: compact summary for the agent
+  console.log(JSON.stringify({
+    ok: true,
+    dir,
+    chunks: chunkIdx,
+    evidenceFiles: manifest.sources.filter((s) => s.type === "evidence").length,
+    hasTemplate: !!tplLog,
+    warnings: manifest.warnings,
+  }, null, 2));
+}
+
+main().catch((e) => { console.error("dossier-builder error:", e.message || e); process.exit(1); });
