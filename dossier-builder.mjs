@@ -179,34 +179,49 @@ async function main() {
     manifest.warnings.push("NewTemplate event not found in creation receipt — template must be fetched manually");
   }
 
-  // Evidence: EvidenceModule or arbitrated contract emits evidence events.
-  // Generic approach: pull ALL logs of this tx's arbitrated contract around
-  // the dispute id is unreliable; instead scan the arbitrable contract's logs
-  // in a window after creation for evidence submissions referencing our
-  // dispute via its local dispute id. Best-effort: collect recent logs.
-  const EVIDENCE_TOPICS = [
-    keccak256(stringToHex("Evidence(address,uint256,string)")), // ERC-792 style
-  ];
-  const evLogs = await getLogs({ address: DISPUTERESOLVER, topics: [EVIDENCE_TOPICS[0], null], fromBlock, toBlock: "latest" }).catch(() => []);
+  // Evidence: use the Kleros Agent Kit (`kleros evidence list`), which resolves
+  // evidence submissions + their IPFS CIDs for a dispute correctly across
+  // resolvers. The previous hand-rolled event scraping matched no events on
+  // this resolver and always returned zero evidence files.
+  const EVIDENCE_CHAIN = "arbitrum-one"; // matches the hardcoded CORE/DISPUTERESOLVER constants above
+  const cidFromUri = (u) => {
+    const m = String(u || "").match(/(?:ipfs:\/\/|ipfs\/)?(Qm[1-9A-HJ-NP-Za-km-z]{44}|baf[a-z0-9]{20,})/);
+    return m ? m[1] : null;
+  };
+  let evItems = [];
+  try {
+    let cursor = null;
+    do {
+      const args = ["evidence", "list", "--chain", EVIDENCE_CHAIN, "--dispute", String(disputeID), "--format", "json", "--limit", "100"];
+      if (cursor) args.push("--cursor", cursor);
+      const out = execFileSync("kleros", args, { maxBuffer: 64 * 1024 * 1024, timeout: 120_000 }).toString();
+      const parsed = JSON.parse(out);
+      evItems = evItems.concat(parsed.items || []);
+      cursor = parsed.hasMore ? parsed.nextCursor : null;
+    } while (cursor);
+  } catch (e) {
+    manifest.warnings.push(`kleros evidence list failed: ${String(e.message || e).slice(0, 160)}`);
+  }
   let idx = 0;
-  for (const lg of evLogs) {
-    // data: uint256 disputeId(local), string evidenceURI
-    const d = Buffer.from(lg.data.replace(/^0x/, ""), "hex");
-    if (d.length < 128) continue;
-    const localId = Number(BigInt("0x" + d.subarray(0, 32).toString("hex")));
-    // Local id mapping differs per contract; accept anything and record it.
-    const offStr = Number(BigInt("0x" + d.subarray(32, 64).toString("hex")));
-    if (!offStr || offStr + 64 > d.length) continue;
-    const lenStr = Number(BigInt("0x" + d.subarray(offStr, offStr + 32).toString("hex")));
-    const uriRaw = d.subarray(offStr + 32, offStr + 32 + lenStr).toString("utf8").replace(/\0+$/g, "");
-    const m = uriRaw.match(/(?:ipfs:\/\/|ipfs\/)?(Qm[1-9A-HJ-NP-Za-km-z]{44}|baf[a-z0-9]{20,})/);
-    if (!m) continue;
-    const cid = m[1];
-    const fname = `${dir}/evidence/ev-${String(idx++).padStart(3, "0")}-${cid.slice(0, 10)}`;
-    const size = await fetchIpfs(cid, fname);
-    manifest.sources.push({ type: "evidence", cid, bytes: size, uri: uriRaw.slice(0, 120), localDisputeId: localId });
-    if (!size) manifest.warnings.push(`could not fetch evidence CID ${cid}`);
-    await sleep(300);
+  for (const it of evItems) {
+    // The actual attachment/file (PDF, image, etc.) lives in fileUri/attachedUri.
+    const fileCid = cidFromUri(it.fileUri || it.attachedUri);
+    if (fileCid) {
+      const fname = `${dir}/evidence/ev-${String(idx++).padStart(3, "0")}-${fileCid.slice(0, 10)}`;
+      const size = await fetchIpfs(fileCid, fname);
+      manifest.sources.push({ type: "evidence", cid: fileCid, bytes: size, uri: it.fileUri, title: it.title, description: it.description, disputeEvidenceId: it.id });
+      if (!size) manifest.warnings.push(`could not fetch evidence CID ${fileCid}`);
+      await sleep(300);
+    }
+    // The evidence document itself (ERC-1497 JSON), when distinct from the file.
+    const docCid = cidFromUri(it.uri);
+    if (docCid && docCid !== fileCid) {
+      const fname = `${dir}/evidence/ev-${String(idx++).padStart(3, "0")}-${docCid.slice(0, 10)}`;
+      const size = await fetchIpfs(docCid, fname);
+      manifest.sources.push({ type: "evidence-doc", cid: docCid, bytes: size, uri: it.uri, title: it.title });
+      if (!size) manifest.warnings.push(`could not fetch evidence doc CID ${docCid}`);
+      await sleep(300);
+    }
   }
 
   // ---- 4. Chunking (~4000 chars each) -------------------------------------
