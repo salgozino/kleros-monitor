@@ -3,6 +3,9 @@
 # Agents helpers
 .atl/
 
+# Git worktrees
+.worktrees/
+
 # Logs & Run data
 dossiers/*
 logs/*
