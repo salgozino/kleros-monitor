@@ -141,7 +141,6 @@ function main() {
   }
   for (const key of Object.keys(st.seen)) {
     const [dispute, round] = key.split("/");
-    const votes = st.seen[key].join(",");
     const v = readVerdict(dispute, round);
     if (!v || v.votes == null) {
       log(`draw ${key}: no verdict.md yet (Fase B pending) — skip`);
