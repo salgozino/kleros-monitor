@@ -18,14 +18,12 @@
 
 import { mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { createRequire } from "node:module";
+import { statSync as fsStatSync } from "node:fs";
 
-import { CORE, DISPUTERESOLVER, DRT, RPC_URLS, IPFS_GATEWAYS, WORKDIR, EVIDENCE_CHAIN } from "./constants.mjs";
+import { CORE, DISPUTERESOLVER, DRT, RPC_URLS, IPFS_GATEWAYS, WORKDIR, EVIDENCE_CHAIN } from "./config.mjs";
 import { rpcWithRetry, getLogs } from "./helpers/rpc.mjs";
 import { fetchIpfs } from "./helpers/ipfs.mjs";
 import { sleep } from "./helpers/utils.mjs";
-
-const require = createRequire(import.meta.url);
 
 const DOSSIER_DIR = `${WORKDIR}/dossiers`;
 
@@ -54,7 +52,7 @@ function extractText(filePath, mime) {
   if ((isPng || isJpg) && mime?.startsWith("image")) {
     // Images can't be text-extracted here; note them so the agent knows to
     // look at the original URI if needed (vision analysis is out of scope).
-    const kb = Math.ceil(require("node:fs").statSync(filePath).size / 1024);
+    const kb = Math.ceil(fsStatSync(filePath).size / 1024);
     return { text: `[image file ${filePath}, ${kb} KB - see original at the listed URI]`, extractor: "image-note" };
   }
   // Try as text
@@ -68,8 +66,8 @@ function extractText(filePath, mime) {
   return null;
 }
 
-async function main() {
-  const [disputeID, roundArg] = process.argv.slice(2);
+export async function main(argv = process.argv.slice(2)) {
+  const [disputeID, roundArg] = argv;
   if (!disputeID) { console.error("usage: dossier-builder.mjs <disputeID> [round]"); process.exit(1); }
 
   const dir = `${DOSSIER_DIR}/${disputeID}-r${roundArg ?? 0}`;
@@ -227,4 +225,7 @@ async function main() {
   }, null, 2));
 }
 
-main().catch((e) => { console.error("dossier-builder error:", e.message || e); process.exit(1); });
+// Standalone execution guard — runs when invoked directly via `node dossier-builder.mjs`.
+if (import.meta.url === new URL(process.argv[1], "file://").href) {
+  main(process.argv.slice(2)).catch((e) => { console.error("dossier-builder error:", e.message || e); process.exit(1); });
+}

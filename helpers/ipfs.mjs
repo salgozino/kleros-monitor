@@ -2,7 +2,7 @@
 // Gateway order preserved from dossier-builder.mjs.
 
 import { writeFileSync } from "node:fs";
-import { IPFS_GATEWAYS } from "../constants.mjs";
+import { IPFS_GATEWAYS } from "../config.mjs";
 
 export async function fetchIpfs(cid, destPath) {
   for (const gw of IPFS_GATEWAYS) {
