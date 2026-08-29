@@ -10,8 +10,12 @@ import { WORKDIR } from "../config.mjs";
 import { deriveJuror } from "../address.mjs";
 
 // Prefer an explicit env override; fall back to deriving from the key file.
-// deriveJuror() is called lazily — only if KLEROS_JUROR_ADDRESS is absent.
-const jurorAddr = (process.env.KLEROS_JUROR_ADDRESS ?? deriveJuror()).toLowerCase();
+// deriveJuror() is called lazily — whenever KLEROS_JUROR_ADDRESS is absent OR
+// empty. Use ||, not ??: a var exported empty by a cron/CI script (e.g.
+// KLEROS_JUROR_ADDRESS="") is "" in process.env, not undefined, so ?? would
+// silently skip the fallback and derive a degenerate state/lock path instead
+// of the real juror address.
+const jurorAddr = (process.env.KLEROS_JUROR_ADDRESS || deriveJuror()).toLowerCase();
 
 export const STATE_FILE = `${WORKDIR}/state-${jurorAddr.slice(2, 10)}.json`;
 export const LOCK_FILE = `/tmp/kleros-draw-monitor-${jurorAddr.slice(2, 10)}.lock`;
