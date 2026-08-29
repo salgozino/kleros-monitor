@@ -12,6 +12,9 @@ logs/*
 state*.json
 agent-journal.jsonl
 
+# Dependencies
+node_modules/
+
 # Secrets
 .env*
 !.env.example

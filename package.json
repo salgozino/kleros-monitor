@@ -1,0 +1,30 @@
+{
+  "name": "kleros-monitor",
+  "version": "1.0.0",
+  "description": "Kleros juror monitoring CLI — deterministic evidence download, LLM dossier build, and vote execution.",
+  "type": "module",
+  "bin": {
+    "kleros-monitor": "bin/kleros-monitor.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "dotenv": "^16.0.0",
+    "viem": "2.55.19"
+  },
+  "devDependencies": {
+    "vitest": "^3.0.0"
+  },
+  "keywords": [
+    "kleros",
+    "juror",
+    "arbitrum",
+    "monitor",
+    "cli"
+  ],
+  "license": "MIT"
+}
