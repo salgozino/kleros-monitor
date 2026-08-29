@@ -16,10 +16,12 @@
 import { existsSync, readFileSync } from "node:fs";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
-import { createRequire } from "node:module";
 
-import { CORE, JUROR, RPC_URLS, TOPIC_DRAW, WORKDIR, PERIOD_NAMES, VIEM_PATH,
-         INIT_LOOKBACK_BLOCKS, BLOCKS_PER_DAY } from "./constants.mjs";
+import { encodeFunctionData, decodeFunctionResult, keccak256, stringToHex } from "viem";
+
+import { CORE, RPC_URLS, WORKDIR } from "./config.mjs";
+import { TOPIC_DRAW, PERIOD_NAMES, INIT_LOOKBACK_BLOCKS } from "./constants.mjs";
+import { deriveJuror } from "./address.mjs";
 import ROUND_ABI from "./abis/round.mjs";
 import { rpc, rpcAny, rpcWithRetry, getLogs } from "./helpers/rpc.mjs";
 import { loadState, saveState, acquireLock, releaseLock } from "./helpers/state.mjs";
@@ -27,12 +29,9 @@ import { sleep, fmtDate, hex } from "./helpers/utils.mjs";
 
 const execFile = promisify(execFileCb);
 
-const require = createRequire(import.meta.url);
-const { encodeFunctionData, decodeFunctionResult } = require(VIEM_PATH);
-
 // ---------------------------------------------------------------- config ---
 // KLEROS_JUROR_ADDRESS exists ONLY for testing (simulate another juror).
-const juror = (process.env.KLEROS_JUROR_ADDRESS || JUROR).toLowerCase(); // derived from ~/.kleros-juror/key (address.mjs)
+const juror = (process.env.KLEROS_JUROR_ADDRESS ?? deriveJuror()).toLowerCase();
 const initLookback = Number(process.env.INIT_LOOKBACK_BLOCKS || INIT_LOOKBACK_BLOCKS);
 
 // --------------------------------------------------------- chain reads -----
@@ -46,7 +45,6 @@ async function getRoundInfo(disputeID, round) {
 // (uint96 courtID, address arbitrated, uint8 period, bool ruled, uint256 lastPeriodChange)
 // (the dynamic Round[] tail is truncated out by the ABI encoder for this accessor shape)
 async function getDisputeHeader(disputeID) {
-  const { keccak256, stringToHex } = require(VIEM_PATH);
   const sel = keccak256(stringToHex("disputes(uint256)")).slice(0, 10);
   const arg = BigInt(disputeID).toString(16).padStart(64, "0");
   const res = await rpcWithRetry("eth_call", [{ to: CORE, data: sel + arg }, "latest"]);
@@ -186,8 +184,9 @@ function renderAlert(groups, isNewMap, opts = {}) {
 }
 
 // --------------------------------------------------------------- main ------
-async function main() {
-  const statusOnly = process.argv.includes("--status");
+export async function main(argv = process.argv.slice(2)) {
+  const statusOnly = argv.includes("--status");
+  const gateMode = argv.includes("--gate");
 
   const headHex = await rpcWithRetry("eth_blockNumber", []);
   const head = parseInt(headHex, 16);
@@ -290,7 +289,7 @@ async function main() {
   const footer = firstRun
     ? "(escaneo inicial: sorteos históricos encontrados dentro de la ventana de búsqueda)"
     : undefined;
-  if (!GATE_MODE) process.stdout.write(renderAlert(fresh, isNewMap, { footer }));
+  if (!gateMode) process.stdout.write(renderAlert(fresh, isNewMap, { footer }));
 }
 
 // ------------------------------------------------------- cron monitor gate --
@@ -344,51 +343,55 @@ function renderGateView(fresh) {
   return lines.join("\n");
 }
 
-acquireLock();
-const GATE_MODE = process.argv.includes("--gate");
+// Standalone execution guard — runs when invoked directly via `node monitor.mjs`.
+if (import.meta.url === new URL(process.argv[1], "file://").href) {
+  acquireLock();
+  const standaloneArgv = process.argv.slice(2);
+  const standaloneGate = standaloneArgv.includes("--gate");
 
-main()
-  .then(async () => {
-    // --gate: cron monitor_script mode. main() already computed `fresh` but it
-    // is scoped inside; re-derive the gate view from persisted state instead.
-    if (!GATE_MODE) return;
-    const st = loadState();
-    if (!st || Object.keys(st.seen).length === 0) {
-      console.log("no-known-draws");
-      return;
-    }
-    const fresh = [];
-    for (const k of Object.keys(st.seen)) {
-      const [d, r] = k.split("/");
-      let dispute = null;
-      try { dispute = await getDisputeHeader(d); } catch {}
-      fresh.push({ disputeID: d, roundID: Number(r), voteIDs: st.seen[k], dispute });
-    }
-    // Only actionable states belong in the gate view. A draw is actionable if:
-    //   - it is in an active period (evidence=0, commit=1, vote=2), OR
-    //   - its dossier is NOT yet complete (chunkCount===0 / no manifest), meaning
-    //     Fase A (download) is still in progress and must keep retrying each tick.
-    // A draw in appeal/execution with a complete dossier is NOT actionable
-    // (nothing to do). This keeps the agent waking until evidence is downloaded.
-    const actionable = fresh.filter((g) => {
-      if (!g.dispute || g.dispute.ruled) return false;
-      if (g.dispute.period === 0 || g.dispute.period === 1 || g.dispute.period === 2) return true;
-      // period 3 (appeal) or 4 (execution): actionable only if dossier incomplete
-      const dir = `${WORKDIR}/dossiers/${g.disputeID}-r${g.roundID}`;
-      const manifestPath = `${dir}/manifest.json`;
-      if (!existsSync(manifestPath)) return true;
-      try {
-        const m = JSON.parse(readFileSync(manifestPath, "utf8"));
-        return (m.chunkCount || 0) === 0;
-      } catch { return true; }
+  main(standaloneArgv)
+    .then(async () => {
+      // --gate: cron monitor_script mode. main() already computed `fresh` but it
+      // is scoped inside; re-derive the gate view from persisted state instead.
+      if (!standaloneGate) return;
+      const st = loadState();
+      if (!st || Object.keys(st.seen).length === 0) {
+        console.log("no-known-draws");
+        return;
+      }
+      const fresh = [];
+      for (const k of Object.keys(st.seen)) {
+        const [d, r] = k.split("/");
+        let dispute = null;
+        try { dispute = await getDisputeHeader(d); } catch {}
+        fresh.push({ disputeID: d, roundID: Number(r), voteIDs: st.seen[k], dispute });
+      }
+      // Only actionable states belong in the gate view. A draw is actionable if:
+      //   - it is in an active period (evidence=0, commit=1, vote=2), OR
+      //   - its dossier is NOT yet complete (chunkCount===0 / no manifest), meaning
+      //     Fase A (download) is still in progress and must keep retrying each tick.
+      // A draw in appeal/execution with a complete dossier is NOT actionable
+      // (nothing to do). This keeps the agent waking until evidence is downloaded.
+      const actionable = fresh.filter((g) => {
+        if (!g.dispute || g.dispute.ruled) return false;
+        if (g.dispute.period === 0 || g.dispute.period === 1 || g.dispute.period === 2) return true;
+        // period 3 (appeal) or 4 (execution): actionable only if dossier incomplete
+        const dir = `${WORKDIR}/dossiers/${g.disputeID}-r${g.roundID}`;
+        const manifestPath = `${dir}/manifest.json`;
+        if (!existsSync(manifestPath)) return true;
+        try {
+          const m = JSON.parse(readFileSync(manifestPath, "utf8"));
+          return (m.chunkCount || 0) === 0;
+        } catch { return true; }
+      });
+      process.stdout.write(actionable.length ? renderGateView(actionable) : "no-actionable-draws");
+    })
+    .catch((e) => {
+      console.error(`[kleros-draw-monitor] ERROR: ${e.message || e}`);
+      process.exitCode = 1;
+    })
+    .finally(() => {
+      // Release the single-instance lock no matter how the run ended.
+      releaseLock();
     });
-    process.stdout.write(actionable.length ? renderGateView(actionable) : "no-actionable-draws");
-  })
-  .catch((e) => {
-    console.error(`[kleros-draw-monitor] ERROR: ${e.message || e}`);
-    process.exitCode = 1;
-  })
-  .finally(() => {
-    // Release the single-instance lock no matter how the run ended.
-    releaseLock();
-  });
+}

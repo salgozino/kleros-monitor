@@ -2,7 +2,7 @@
 // Preserves fetch + AbortController retry semantics from monitor.mjs and
 // getLogs semantics from dossier-builder.mjs.
 
-import { RPC_URLS } from "../constants.mjs";
+import { RPC_URLS } from "../config.mjs";
 import { sleep } from "./utils.mjs";
 
 // Single-endpoint call with AbortController timeout.

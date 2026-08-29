@@ -51,23 +51,23 @@ Chain strategy: pending
 
 ## Phase 2: Script Wiring — Import Swap and `main` Exports
 
-- [ ] 2.1 **`monitor.mjs` (Modify)** — Drop both `require(VIEM_PATH)` lines (L31, L49); add `import { … } from "viem"`; change `import { … } from "./constants.mjs"` to `import { WORKDIR, COURT_ID, RPC_URLS } from "./config.mjs"`; import `deriveJuror` from `./address.mjs`; resolve juror as `process.env.KLEROS_JUROR_ADDRESS ?? deriveJuror()`; wrap current top-level logic in `export async function main(argv = process.argv.slice(2)) { … }`; guard side-effects behind `if (import.meta.url === new URL(process.argv[1], "file://").href) main()`.
+- [x] 2.1 **`monitor.mjs` (Modify)** — Drop both `require(VIEM_PATH)` lines (L31, L49); add `import { … } from "viem"`; change `import { … } from "./constants.mjs"` to `import { WORKDIR, COURT_ID, RPC_URLS } from "./config.mjs"`; import `deriveJuror` from `./address.mjs`; resolve juror as `process.env.KLEROS_JUROR_ADDRESS ?? deriveJuror()`; wrap current top-level logic in `export async function main(argv = process.argv.slice(2)) { … }`; guard side-effects behind `if (import.meta.url === new URL(process.argv[1], "file://").href) main()`.
   - Acceptance: `node monitor.mjs --gate` still works standalone; `import { main } from "./monitor.mjs"` resolves without executing.
   - Maps to: cli-binary spec §Flag Passthrough; design §Scripts as modules.
 
-- [ ] 2.2 **`dossier-builder.mjs` (Modify)** — Change constants import to `import { CORE, DISPUTERESOLVER, DRT, RPC_URLS, IPFS_GATEWAYS, WORKDIR, EVIDENCE_CHAIN } from "./config.mjs"`; export `async function main(argv)`; add `import.meta` guard for standalone execution.
+- [x] 2.2 **`dossier-builder.mjs` (Modify)** — Change constants import to `import { CORE, DISPUTERESOLVER, DRT, RPC_URLS, IPFS_GATEWAYS, WORKDIR, EVIDENCE_CHAIN } from "./config.mjs"`; export `async function main(argv)`; add `import.meta` guard for standalone execution.
   - Acceptance: `node dossier-builder.mjs --help` (or equivalent flag) runs standalone; `import { main } from "./dossier-builder.mjs"` resolves without side effects.
   - Maps to: cli-binary spec §Subcommand Routing; design §File Changes.
 
-- [ ] 2.3 **`phase-c-executor.mjs` (Modify)** — Change `import { CORE, JUROR, WORKDIR } from "./constants.mjs"` to `import { WORKDIR, KLEROS_JUROR_HOME } from "./config.mjs"`; derive CORE from config; build `const HOME_ARGS = ["--home", KLEROS_JUROR_HOME]`; append `...HOME_ARGS` to every `execFileSync("kleros-juror", …)` call in `klerosStatus`, `klerosCommit` (both simulate and broadcast), and `klerosReveal` (both simulate and broadcast) — 5 call sites total. Export `function main(argv)`; add `import.meta` guard. **Confirm at apply:** verify `--home` flag exists in the installed `kleros-juror --version`; note minimum version in README.
+- [x] 2.3 **`phase-c-executor.mjs` (Modify)** — Change `import { CORE, JUROR, WORKDIR } from "./constants.mjs"` to `import { WORKDIR, KLEROS_JUROR_HOME } from "./config.mjs"`; derive CORE from config; build `const HOME_ARGS = ["--home", KLEROS_JUROR_HOME]`; append `...HOME_ARGS` to every `execFileSync("kleros-juror", …)` call in `klerosStatus`, `klerosCommit` (both simulate and broadcast), and `klerosReveal` (both simulate and broadcast) — 5 call sites total. Export `function main(argv)`; add `import.meta` guard. **Confirm at apply:** verify `--home` flag exists in the installed `kleros-juror --version`; note minimum version in README.
   - Acceptance: grepping `execFileSync("kleros-juror"` in the file shows `HOME_ARGS` spread on every match (5 occurrences); `node phase-c-executor.mjs` runs standalone.
   - Maps to: phase-c-executor spec §Deterministic Vote Execution, §--home reaches every call.
 
-- [ ] 2.4 **`bin/kleros-monitor.mjs` (Create)** — `#!/usr/bin/env node`; ESM imports of `main` from each script and a `runDoctor` function; `switch(process.argv[2])` routing: `monitor`|`watch` → `monitor.main`, `dossier`|`evidence-download` → `dossier.main`, `vote-executor` → `executor.main`, `doctor` → `runDoctor`; no-args / `--help` / `-h` → print usage to stdout, exit 0; unknown subcommand → print usage to stderr, exit 1; invoke with `process.argv.slice(2)` forwarded to each `main`.
+- [x] 2.4 **`bin/kleros-monitor.mjs` (Create)** — `#!/usr/bin/env node`; ESM imports of `main` from each script and a `runDoctor` function; `switch(process.argv[2])` routing: `monitor`|`watch` → `monitor.main`, `dossier`|`evidence-download` → `dossier.main`, `vote-executor` → `executor.main`, `doctor` → `runDoctor`; no-args / `--help` / `-h` → print usage to stdout, exit 0; unknown subcommand → print usage to stderr, exit 1; invoke with `process.argv.slice(2)` forwarded to each `main`.
   - Acceptance: `node bin/kleros-monitor.mjs --help` exits 0 and lists all subcommands; `node bin/kleros-monitor.mjs bogus` exits non-zero; `node bin/kleros-monitor.mjs watch --gate` and `node bin/kleros-monitor.mjs monitor --gate` both resolve to the same `monitor.main` code path.
   - Maps to: cli-binary spec §Single Entry Point, §Subcommand Routing, §Help Output, §Flag Passthrough.
 
-- [ ] 2.5 **`doctor` implementation (part of `bin/kleros-monitor.mjs` or `lib/doctor.mjs`)** — Sequential checks: (1) config loads without throw, (2) key file exists at `path.join(KLEROS_JUROR_HOME, "key")`, (3) key file mode is `0o600`, (4) `which kleros-juror` resolves, (5) check `kleros-juror --version` against minimum threshold → WARN if below (not FAIL), (6) `which kleros` resolves, (7) Arbitrum One RPC responds (HEAD or `eth_blockNumber`). Prereq-failed checks report SKIPPED. Each FAIL includes `cta` string. Default output: human-readable table; `--json` flag: stdout as JSON array. Exit non-zero if any check is FAIL.
+- [x] 2.5 **`doctor` implementation (part of `bin/kleros-monitor.mjs` or `lib/doctor.mjs`)** — Sequential checks: (1) config loads without throw, (2) key file exists at `path.join(KLEROS_JUROR_HOME, "key")`, (3) key file mode is `0o600`, (4) `which kleros-juror` resolves, (5) check `kleros-juror --version` against minimum threshold → WARN if below (not FAIL), (6) `which kleros` resolves, (7) Arbitrum One RPC responds (HEAD or `eth_blockNumber`). Prereq-failed checks report SKIPPED. Each FAIL includes `cta` string. Default output: human-readable table; `--json` flag: stdout as JSON array. Exit non-zero if any check is FAIL.
   - Acceptance: with missing key file, check 2 is FAIL and check 3 is SKIPPED; `--json` output is `JSON.parse`-able; with old `kleros-juror`, check 4 is WARN (exit 0). Five checks PASS + one FAIL → exit non-zero.
   - Maps to: doctor-command spec (all requirements and scenarios).
 
@@ -75,15 +75,15 @@ Chain strategy: pending
 
 ## Phase 3: Config Assets
 
-- [ ] 3.1 **`.env.example` (Create)** — One entry per config field; inline comment on each line: REQUIRED (no default) vs SANE DEFAULT (shows the default value). All 10 fields from `config.mjs` covered.
+- [x] 3.1 **`.env.example` (Create)** — One entry per config field; inline comment on each line: REQUIRED (no default) vs SANE DEFAULT (shows the default value). All 10 fields from `config.mjs` covered.
   - Acceptance: `grep -c "REQUIRED" .env.example` ≥ 3; `grep -c "SANE DEFAULT\|DEFAULT" .env.example` ≥ 7.
   - Maps to: proposal §Success Criteria (.env.example covers every field).
 
-- [ ] 3.2 **`README.md` (Create)** — Quickstart (install, `.env` setup, first `doctor` run, first `monitor` run); coupling section naming `kleros-juror-cli` and `@kleros/agentkit` as required external tools and stating Arbitrum One-only constraint; viem version pin note.
+- [x] 3.2 **`README.md` (Create)** — Quickstart (install, `.env` setup, first `doctor` run, first `monitor` run); coupling section naming `kleros-juror-cli` and `@kleros/agentkit` as required external tools and stating Arbitrum One-only constraint; viem version pin note.
   - Acceptance: README contains the words "kleros-juror-cli", "agentkit", "Arbitrum One", and a viem version pin line.
   - Maps to: proposal §In-Scope (README), §Risks (Arbitrum One-only confusion).
 
-- [ ] 3.3 **`LICENSE` (Create)** — Add a standard license file (MIT or as per project preference).
+- [x] 3.3 **`LICENSE` (Create)** — Add a standard license file (MIT or as per project preference).
   - Acceptance: file exists and is non-empty.
   - Maps to: proposal §In-Scope (LICENSE).
 
@@ -107,11 +107,11 @@ Chain strategy: pending
   - Acceptance: `vitest run test/state.test.mjs` exits 0; `vitest run` (full suite) exits 0.
   - Maps to: tests spec §No External Mocking, §Vitest as Test Runner.
 
-- [ ] 4.5 **Regression: standalone script check** — Run `node --check monitor.mjs dossier-builder.mjs phase-c-executor.mjs address.mjs config.mjs bin/kleros-monitor.mjs` with no errors. Verify `node bin/kleros-monitor.mjs --help` exits 0 and all four subcommands appear in usage.
+- [x] 4.5 **Regression: standalone script check** — Run `node --check monitor.mjs dossier-builder.mjs phase-c-executor.mjs address.mjs config.mjs bin/kleros-monitor.mjs` with no errors. Verify `node bin/kleros-monitor.mjs --help` exits 0 and all four subcommands appear in usage.
   - Acceptance: all `node --check` invocations exit 0; `--help` output contains `monitor`, `dossier`, `vote-executor`, `doctor`.
   - Maps to: cli-binary spec §Help Output; proposal §Success Criteria.
 
-- [ ] 4.6 **Threat matrix: --home arg-array spot check** — Inspect `phase-c-executor.mjs` source: grep for `execFileSync("kleros-juror"` and confirm each occurrence spreads `HOME_ARGS` (no shell-string composition, no omission). Exactly 5 occurrences required.
+- [x] 4.6 **Threat matrix: --home arg-array spot check** — Inspect `phase-c-executor.mjs` source: grep for `execFileSync("kleros-juror"` and confirm each occurrence spreads `HOME_ARGS` (no shell-string composition, no omission). Exactly 5 occurrences required.
   - Acceptance: `grep -c 'execFileSync("kleros-juror"' phase-c-executor.mjs` returns 5; each match includes `HOME_ARGS`.
   - Maps to: design §Threat Matrix (PR commands / argument composition); phase-c-executor spec §--home reaches every call.
 

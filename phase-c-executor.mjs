@@ -37,12 +37,21 @@
 // Safety: simulate is the default; only --broadcast sends. This script is
 // invoked WITH --broadcast by the cron job (the human already approved the
 // on-chain action when the LLM wrote decision.json + verdict.md).
+//
+// Requires kleros-juror >= 0.1.0 — the minimum version that supports --home.
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 
-import { CORE, JUROR, WORKDIR } from "./constants.mjs";
+import { WORKDIR, KLEROS_JUROR_HOME } from "./config.mjs";
 import { loadState } from "./helpers/state.mjs";
+
+// --home flag: routes kleros-juror to the operator's key directory.
+// Required since kleros-juror >= 0.1.0.
+const HOME_ARGS = ["--home", KLEROS_JUROR_HOME];
+
+// Derive CORE from config (not from constants — operator may override).
+import { CORE } from "./config.mjs";
 
 // Broadcast is controlled by env var (scheduler passes no CLI args reliably).
 const BROADCAST = process.env.PHASE_C_BROADCAST === "1";
@@ -94,7 +103,7 @@ function readTemplateAnswers(dispute, round) {
 }
 
 function klerosStatus(dispute, round, votes) {
-  const args = ["status", "--dispute", String(dispute), "--round", String(round), "--votes", votes];
+  const args = ["status", "--dispute", String(dispute), "--round", String(round), "--votes", votes, ...HOME_ARGS];
   try {
     const out = execFileSync("kleros-juror", args, { encoding: "utf8", timeout: 60_000 });
     return JSON.parse(out);
@@ -105,7 +114,7 @@ function klerosStatus(dispute, round, votes) {
 }
 
 function klerosCommit(dispute, round, votes, choice) {
-  const base = ["commit", "--dispute", String(dispute), "--round", String(round), "--votes", votes, "--choice", String(choice)];
+  const base = ["commit", "--dispute", String(dispute), "--round", String(round), "--votes", votes, "--choice", String(choice), ...HOME_ARGS];
   const sim = execFileSync("kleros-juror", [...base], { encoding: "utf8", timeout: 90_000 });
   const simJson = JSON.parse(sim);
   if (!BROADCAST) return { broadcast: false, simJson };
@@ -115,7 +124,7 @@ function klerosCommit(dispute, round, votes, choice) {
 
 function klerosReveal(dispute, round, votes, choice) {
   const verdictPath = `${WORKDIR}/dossiers/${dispute}-r${round}/verdict.md`;
-  const base = ["reveal", "--dispute", String(dispute), "--round", String(round), "--votes", votes, "--choice", String(choice), "--justification", `@${verdictPath}`];
+  const base = ["reveal", "--dispute", String(dispute), "--round", String(round), "--votes", votes, "--choice", String(choice), "--justification", `@${verdictPath}`, ...HOME_ARGS];
   const sim = execFileSync("kleros-juror", [...base], { encoding: "utf8", timeout: 90_000 });
   const simJson = JSON.parse(sim);
   if (!BROADCAST) return { broadcast: false, simJson };
@@ -123,7 +132,7 @@ function klerosReveal(dispute, round, votes, choice) {
   return { broadcast: true, json: JSON.parse(out) };
 }
 
-function main() {
+export function main(argv = process.argv.slice(2)) {
   const st = loadState();
   if (!st || !st.seen || Object.keys(st.seen).length === 0) {
     // Silent: nothing to do, don't notify (watchdog pattern).
@@ -190,4 +199,7 @@ function main() {
   }
 }
 
-try { main(); } catch (e) { log(`ERROR ${e.message || e}`); process.exitCode = 1; }
+// Standalone execution guard — runs when invoked directly via `node phase-c-executor.mjs`.
+if (import.meta.url === new URL(process.argv[1], "file://").href) {
+  try { main(process.argv.slice(2)); } catch (e) { log(`ERROR ${e.message || e}`); process.exitCode = 1; }
+}
