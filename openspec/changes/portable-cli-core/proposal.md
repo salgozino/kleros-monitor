@@ -28,7 +28,7 @@ This change packages the deterministic core (monitor, dossier-builder, vote-exec
 - Harness abstraction / multi-agent-runtime support → **Change 2**
 - Skill-generation CLI command / templating `veredict-skill.md` → **Change 2**
 - Output channel/language as a consumed config axis → **Change 2** (a config field name may be reserved, but nothing consumes it here)
-- `stake-court34.mjs` — stays a separate, unpackaged operator utility
+- `stake-court34.mjs` — removed: it imported operator constants this change strips from constants.mjs, and was already slated for removal in a separate change
 - Multi-chain vote execution — blocked by `kleros-juror-cli` being Arbitrum One-only by design; document the constraint instead
 - Programmatic/importable JS API — CLI-only by explicit user choice
 - A full test suite — no test runner exists today; smoke checks (`node --check`) at most
@@ -91,7 +91,7 @@ This change packages the deterministic core (monitor, dossier-builder, vote-exec
 | `README.md` | New | Quickstart, `.env` setup, coupling documentation |
 | `LICENSE` | New | License file |
 | `veredict-skill.md` | No change | Hermes-specific; Change 2 scope |
-| `stake-court34.mjs` | No change | Separate operator utility, unpackaged |
+| `stake-court34.mjs` | Removed | Depended on constants.mjs exports removed here; already slated for removal separately |
 | `scripts/` | No change | Hermes-specific tooling; Change 2 scope |
 
 ## Risks

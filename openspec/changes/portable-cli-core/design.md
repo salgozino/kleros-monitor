@@ -51,7 +51,7 @@
 | `README.md`, `LICENSE` | Create | Quickstart, coupling section (kleros-juror-cli/agentkit, Arbitrum-One-only); license. |
 | `test/config.test.mjs`, `test/state.test.mjs` | Create | Pure-logic unit tests. |
 
-Unchanged (out of scope): `helpers/rpc.mjs`, `ipfs.mjs`, `utils.mjs`, `abis/*.mjs`, `veredict-skill.md`, `stake-court34.mjs`, `scripts/`.
+Unchanged (out of scope): `helpers/rpc.mjs`, `ipfs.mjs`, `utils.mjs`, `abis/*.mjs`, `veredict-skill.md`, `scripts/`. `stake-court34.mjs` is removed by this work unit (Judgment Day finding C1) instead of migrated: it depended on constants.mjs exports this change removes, and was already slated for removal in a separate change.
 
 ## Interfaces / Contracts
 
@@ -95,4 +95,4 @@ No data migration. Scripts remain runnable standalone (`node monitor.mjs`) via t
 
 - [ ] Exact `viem` version to pin — confirm against `kleros-juror-cli`'s bundled version at apply time.
 - [ ] Known-good `kleros-juror --version` threshold for the `--home` gate — needs the upstream version that introduced `--home`.
-- [ ] Change 2 boundary confirmed clean: no Hermes/channel/language assumptions enter config or router here; `veredict-skill.md`, `scripts/`, `stake-court34.mjs` untouched.
+- [ ] Change 2 boundary confirmed clean: no Hermes/channel/language assumptions enter config or router here; `veredict-skill.md`, `scripts/` untouched. `stake-court34.mjs` removed (broken by the constants.mjs export cleanup; already slated for removal separately).
