@@ -51,7 +51,7 @@ const DEFAULTS = {
  * @returns {{ WORKDIR: string, COURT_ID: string, KLEROS_JUROR_HOME: string,
  *             RPC_URLS: string[], IPFS_GATEWAYS: string[], CORE: string,
  *             PNK: string, SORT: string, DISPUTERESOLVER: string,
- *             DRT: string, EVIDENCE_CHAIN: string }}
+ *             DRT: string, EVIDENCE_CHAIN: string, HARNESS: string }}
  */
 export function loadConfig(env) {
   // Validate all required fields up front.
@@ -94,6 +94,11 @@ export function loadConfig(env) {
 
     // Chain/network fields.
     EVIDENCE_CHAIN: env.EVIDENCE_CHAIN || DEFAULTS.EVIDENCE_CHAIN,
+
+    // Harness selector — which LLM harness to use for skill generation.
+    // Optional; defaults to "hermes". No validation here: unknown names
+    // are caught at runtime by getHarness() in lib/harness.mjs.
+    HARNESS: env.HARNESS?.trim() || "hermes",
   };
 }
 
@@ -112,3 +117,4 @@ export const SORT = _cfg.SORT;
 export const DISPUTERESOLVER = _cfg.DISPUTERESOLVER;
 export const DRT = _cfg.DRT;
 export const EVIDENCE_CHAIN = _cfg.EVIDENCE_CHAIN;
+export const HARNESS = _cfg.HARNESS;

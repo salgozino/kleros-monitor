@@ -6,6 +6,7 @@
 //   dossier | evidence-download — build evidence dossier for a dispute
 //   vote-executor          — run the deterministic vote executor
 //   doctor                 — run environment health checks
+//   skill                  — harness skill generation utilities
 //
 // All flags after the subcommand are forwarded to the respective main().
 //
@@ -15,6 +16,7 @@
 //   kleros-monitor evidence-download <disputeID> [round] [flags]
 //   kleros-monitor vote-executor [flags]
 //   kleros-monitor doctor [--json]
+//   kleros-monitor skill generate [--harness <name>]
 //   kleros-monitor --help | -h
 
 const USAGE = `
@@ -30,6 +32,9 @@ Subcommands:
                            Env: PHASE_C_BROADCAST=1 to broadcast on-chain.
   doctor                   Run environment health checks.
                            Flags: --json
+  skill generate           Render and write the verdict-skill prompt to
+                           \$WORKDIR/veredict-skill.md.
+                           Options: --harness <name> (default: hermes)
 
 Options:
   --help, -h               Show this help and exit.
@@ -61,6 +66,12 @@ switch (subcommand) {
   case "doctor": {
     const { runDoctor } = await import("../lib/doctor.mjs");
     await runDoctor(rest);
+    break;
+  }
+
+  case "skill": {
+    const { main } = await import("../lib/skill.mjs");
+    await main(rest);
     break;
   }
 
