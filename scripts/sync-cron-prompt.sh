@@ -24,11 +24,13 @@ fi
 # --- backup current prompt ---
 echo "1/3 Backing up current prompt for job ${JOB_ID}..."
 BACKUP_FILE=".prompt-backup-${JOB_ID}.txt"
-if ! hermes cron show "${JOB_ID}" --prompt > "${BACKUP_FILE}" 2>/dev/null; then
+NEW_BACKUP="${BACKUP_FILE}.new"
+if ! hermes cron show "${JOB_ID}" --prompt > "${NEW_BACKUP}" 2>/dev/null; then
   echo "ERROR: could not back up current prompt for job ${JOB_ID}. Refusing to overwrite without backup." >&2
-  rm -f "${BACKUP_FILE}"
+  rm -f "${NEW_BACKUP}"
   exit 1
 fi
+mv "${NEW_BACKUP}" "${BACKUP_FILE}"
 echo "    Backup saved to ${BACKUP_FILE} ($(wc -c < "${BACKUP_FILE}") bytes)"
 
 # --- generate ---
