@@ -11,7 +11,12 @@
 // kleros-juror-cli@0.1.0. Do not upgrade independently of kleros-juror-cli.
 // See README.md (WU2) for the full coupling section.
 
-import "dotenv/config";
+import dotenv from "dotenv";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+dotenv.config({ path: join(__dirname, ".env") });
 
 // REQUIRED — throws if missing or empty; no sane default exists for these.
 const REQUIRED = ["WORKDIR", "COURT_ID", "KLEROS_JUROR_HOME"];
