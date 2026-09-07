@@ -26,5 +26,6 @@
     "monitor",
     "cli"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "packageManager": "yarn@4.13.0"
 }
