@@ -1,6 +1,6 @@
 {
   "name": "kleros-monitor",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Kleros juror monitoring CLI — deterministic evidence download, LLM dossier build, and vote execution.",
   "type": "module",
   "bin": {
