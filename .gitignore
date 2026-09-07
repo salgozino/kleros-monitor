@@ -2,6 +2,7 @@
 
 # Agents helpers
 .atl/
+.codegraph/
 
 # Git worktrees
 .worktrees/
@@ -16,6 +17,9 @@ agent-journal.jsonl
 node_modules/
 package-lock.json
 .yarn/install-state.gz
+
+# Operator-specific skill (contains personal data; generate via `skill generate`)
+veredict-skill.md
 
 # Secrets
 .env*

@@ -82,8 +82,9 @@ kleros-monitor --help
 ## Skill generation
 
 The `skill generate` command renders the harness-specific verdict-skill prompt
-and writes it to `$WORKDIR/veredict-skill.md`. Run this once per deployment to
-produce a portable, operator-specific skill file — no hand-editing required.
+and writes it to `$WORKDIR/veredict-skill.md`. This file is **not tracked by
+git** because it contains operator-specific data (working directory paths,
+session IDs). Each operator must generate their own before first use.
 
 ```bash
 node bin/kleros-monitor.mjs skill generate
