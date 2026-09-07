@@ -24,11 +24,12 @@ fi
 # --- backup current prompt ---
 echo "1/3 Backing up current prompt for job ${JOB_ID}..."
 BACKUP_FILE=".prompt-backup-${JOB_ID}.txt"
-if hermes cron show "${JOB_ID}" --prompt > "${BACKUP_FILE}" 2>/dev/null; then
-  echo "    Backup saved to ${BACKUP_FILE} ($(wc -c < "${BACKUP_FILE}") bytes)"
-else
-  echo "    WARNING: could not back up current prompt (new job or hermes error). Continuing anyway." >&2
+if ! hermes cron show "${JOB_ID}" --prompt > "${BACKUP_FILE}" 2>/dev/null; then
+  echo "ERROR: could not back up current prompt for job ${JOB_ID}. Refusing to overwrite without backup." >&2
+  rm -f "${BACKUP_FILE}"
+  exit 1
 fi
+echo "    Backup saved to ${BACKUP_FILE} ($(wc -c < "${BACKUP_FILE}") bytes)"
 
 # --- generate ---
 echo "2/3 Regenerating veredict-skill.md from harness template..."
