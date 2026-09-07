@@ -60,7 +60,8 @@ in a dispute.
       1. `<WORKDIR>/dossiers/D-R/decision.json` — machine-readable verdict:
          `{"dispute": D, "round": R, "choice": N}`
       2. `<WORKDIR>/dossiers/D-R/verdict.md` — public justification only
-         (Markdown, English, Kleros style, citing evidence; NO session ID,
+          (Markdown, Kleros style, citing evidence, written in the same
+          language as the dispute policy/rules document; NO session ID,
          NO operational headers; this file is published on-chain as-is).
 
    c. Write `checkpoint.json {"done": true}` and a journal audit line

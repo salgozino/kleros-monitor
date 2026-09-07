@@ -35,7 +35,8 @@ MANDATORY PROTOCOL (in order):
       (no "votes" — phase-c-executor.mjs already gets them from monitor state, no need to repeat them).
 
    2. {{WORKDIR}}/dossiers/D-R/verdict.md — ONLY the public justification. This file is published AS-IS on-chain (--justification @verdict.md, emitted in the VoteCast event, public forever, costs gas per byte). Rules for this file:
-      - Clean Markdown, in English, Kleros style, citing evidence.
+      - Clean Markdown, Kleros style, citing evidence.
+      - Write in the SAME LANGUAGE as the dispute policy/rules document. If the policy is in English, write in English; if in Spanish, write in Spanish; etc. When in doubt, default to English.
       - NO DISPUTE/ROUND/VOTES/CHOICE header — that goes in decision.json.
       - At the end, a short metadata footer (yes, this DOES go here — we want this to be public):
 
