@@ -20,13 +20,27 @@ if ! command -v hermes &>/dev/null; then
   echo "ERROR: hermes is not in PATH. Install it or add it to PATH before running this script." >&2
   exit 1
 fi
+if ! command -v jq &>/dev/null; then
+  echo "ERROR: jq is not installed. Install it (apt install jq) before running this script." >&2
+  exit 1
+fi
 
 # --- backup current prompt ---
 echo "1/3 Backing up current prompt for job ${JOB_ID}..."
 BACKUP_FILE=".prompt-backup-${JOB_ID}.txt"
 NEW_BACKUP="${BACKUP_FILE}.new"
-if ! hermes cron show "${JOB_ID}" --prompt > "${NEW_BACKUP}" 2>/dev/null; then
+JOBS_FILE="${HOME}/.hermes/cron/jobs.json"
+if [ ! -f "${JOBS_FILE}" ]; then
+  echo "ERROR: ${JOBS_FILE} not found. Cannot back up current prompt." >&2
+  exit 1
+fi
+if ! jq -je --arg id "${JOB_ID}" '.jobs[] | select(.id == $id) | .prompt' "${JOBS_FILE}" > "${NEW_BACKUP}" 2>/dev/null; then
   echo "ERROR: could not back up current prompt for job ${JOB_ID}. Refusing to overwrite without backup." >&2
+  rm -f "${NEW_BACKUP}"
+  exit 1
+fi
+if [ ! -s "${NEW_BACKUP}" ]; then
+  echo "ERROR: backed up prompt is empty for job ${JOB_ID}. Refusing to overwrite without valid backup." >&2
   rm -f "${NEW_BACKUP}"
   exit 1
 fi
