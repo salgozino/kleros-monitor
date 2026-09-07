@@ -130,13 +130,10 @@ describe("skill generate — happy path (hermes)", () => {
 
   beforeEach(() => {
     workdir = makeTempWorkdir();
-    // Provide a test HERMES_SESSION_ID so the template substitutes cleanly.
-    process.env.HERMES_SESSION_ID = "integration-test-session";
   });
 
   afterEach(() => {
     workdir.cleanup();
-    delete process.env.HERMES_SESSION_ID;
   });
 
   it("writes veredict-skill.md to WORKDIR", async () => {
@@ -218,12 +215,10 @@ describe("skill generate — re-run overwrites existing file", () => {
 
   beforeEach(() => {
     workdir = makeTempWorkdir();
-    process.env.HERMES_SESSION_ID = "rerun-session";
   });
 
   afterEach(() => {
     workdir.cleanup();
-    delete process.env.HERMES_SESSION_ID;
   });
 
   it("warns on stderr when output file already exists", async () => {
@@ -296,12 +291,10 @@ describe("skill generate — token parity (integration)", () => {
 
   beforeEach(() => {
     workdir = makeTempWorkdir();
-    process.env.HERMES_SESSION_ID = "parity-integration-session";
   });
 
   afterEach(() => {
     workdir.cleanup();
-    delete process.env.HERMES_SESSION_ID;
   });
 
   it("output file has no unresolved {{...}} tokens (parity with hermes template)", async () => {

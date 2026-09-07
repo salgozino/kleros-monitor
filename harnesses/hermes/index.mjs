@@ -4,10 +4,12 @@
 //   { name: string, renderSkill(config) -> string }
 //
 // renderSkill is a PURE function: reads the template and substitutes
-// {{WORKDIR}} and {{HARNESS_SESSION_ID}} via plain String.replaceAll.
+// {{WORKDIR}} via plain String.replaceAll.
 // No file writes, no subprocess calls, no side effects.
 //
 // Template location: harnesses/hermes/veredict-skill.md (sibling file).
+// Note: HERMES_SESSION_ID is captured at runtime by the agent itself
+// (echo $HERMES_SESSION_ID) — no build-time substitution needed.
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -30,10 +32,5 @@ export const name = "hermes";
 export function renderSkill(config) {
   const template = readFileSync(TEMPLATE_PATH, "utf8");
 
-  return template
-    .replaceAll("{{WORKDIR}}", config.WORKDIR)
-    .replaceAll(
-      "{{HARNESS_SESSION_ID}}",
-      process.env.HERMES_SESSION_ID ?? ""
-    );
+  return template.replaceAll("{{WORKDIR}}", config.WORKDIR);
 }
