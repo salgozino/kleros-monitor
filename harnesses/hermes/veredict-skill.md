@@ -9,7 +9,6 @@ FIXED DATA:
 RUN IDENTITY:
 
 - On STARTUP (step 1), run `echo $HERMES_SESSION_ID` and store that exact value (SESSION_ID). Write it to the journal (never in verdict.md or decision.json — see GOLDEN RULES).
-- SESSION_ID for this run: {{HARNESS_SESSION_ID}}
 
 TIME MEASUREMENT (do this yourself — it is the only metric in this list you CAN measure with certainty):
 

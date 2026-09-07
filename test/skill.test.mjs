@@ -83,12 +83,10 @@ describe("skill generate — happy path", () => {
 
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "kleros-skill-test-"));
-    process.env.HERMES_SESSION_ID = "test-session-skill";
   });
 
   afterEach(() => {
     rmSync(tmpDir, { recursive: true, force: true });
-    delete process.env.HERMES_SESSION_ID;
     vi.resetModules();
   });
 

@@ -51,20 +51,6 @@ describe("getHarness — unknown harness", () => {
 // ── Task 4.3: renderSkill substitutes tokens correctly ───────────────────────
 
 describe("renderSkill — token substitution", () => {
-  const originalEnv = process.env.HERMES_SESSION_ID;
-
-  beforeEach(() => {
-    process.env.HERMES_SESSION_ID = "test-session-abc123";
-  });
-
-  afterEach(() => {
-    if (originalEnv === undefined) {
-      delete process.env.HERMES_SESSION_ID;
-    } else {
-      process.env.HERMES_SESSION_ID = originalEnv;
-    }
-  });
-
   it("contains the WORKDIR value from config", () => {
     const adapter = getHarness("hermes");
     const output = adapter.renderSkill(FIXTURE_CONFIG);
@@ -89,10 +75,10 @@ describe("renderSkill — token substitution", () => {
     expect(output).not.toContain("/root/");
   });
 
-  it("contains the HERMES_SESSION_ID value when set", () => {
+  it("contains literal $HERMES_SESSION_ID for runtime capture", () => {
     const adapter = getHarness("hermes");
     const output = adapter.renderSkill(FIXTURE_CONFIG);
-    expect(output).toContain("test-session-abc123");
+    expect(output).toContain("$HERMES_SESSION_ID");
   });
 });
 
@@ -110,17 +96,14 @@ describe("renderSkill — token parity", () => {
     const uniqueTokens = [...new Set(tokens)];
 
     // Each token must NOT appear in the rendered output.
-    process.env.HERMES_SESSION_ID = "parity-session";
     const adapter = getHarness("hermes");
     const output = adapter.renderSkill(FIXTURE_CONFIG);
-    delete process.env.HERMES_SESSION_ID;
 
     for (const token of uniqueTokens) {
       expect(output, `Unresolved token: ${token}`).not.toContain(token);
     }
 
-    // Sanity: the template must have had at least WORKDIR and HARNESS_SESSION_ID.
+    // Sanity: the template must have had at least WORKDIR.
     expect(uniqueTokens).toContain("{{WORKDIR}}");
-    expect(uniqueTokens).toContain("{{HARNESS_SESSION_ID}}");
   });
 });
