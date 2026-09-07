@@ -72,9 +72,58 @@ kleros-monitor watch   [--status] [--gate]     # alias for monitor
 kleros-monitor dossier <disputeID> [round]
 kleros-monitor evidence-download <disputeID> [round]  # alias for dossier
 kleros-monitor vote-executor
+kleros-monitor skill generate [--harness <name>]
 kleros-monitor doctor [--json]
 kleros-monitor --help
 ```
+
+---
+
+## Skill generation
+
+The `skill generate` command renders the harness-specific verdict-skill prompt
+and writes it to `$WORKDIR/veredict-skill.md`. Run this once per deployment to
+produce a portable, operator-specific skill file — no hand-editing required.
+
+```bash
+node bin/kleros-monitor.mjs skill generate
+# or via the yarn script shorthand (if configured):
+yarn kleros-monitor skill generate
+```
+
+Override the harness for a single run with `--harness`:
+
+```bash
+node bin/kleros-monitor.mjs skill generate --harness hermes
+```
+
+Or set the `HARNESS` environment variable in your `.env`:
+
+```
+HARNESS=hermes   # optional; defaults to hermes
+```
+
+### Harnesses directory layout
+
+```
+harnesses/
+  hermes/
+    index.mjs           — Hermes adapter (implemented; registered in lib/harness.mjs)
+    veredict-skill.md   — Hermes prompt template ({{WORKDIR}} / {{HARNESS_SESSION_ID}})
+  claw/
+    README.md           — Claw invocation contract (design-only documentation)
+    veredict-skill.md   — Claw prompt template [DESIGN ONLY — no runtime adapter]
+```
+
+| Harness | Status      | `skill generate` support |
+|---------|-------------|--------------------------|
+| `hermes` | Implemented | ✅ Default                |
+| `claw`   | Design only | ❌ Exits with error       |
+
+> **Claw is design-only.** Running `skill generate --harness claw` (or setting
+> `HARNESS=claw`) will exit with code 1 and an error message. See
+> `harnesses/claw/README.md` for the intended contract and the implementation
+> checklist for a future adapter.
 
 ---
 
@@ -112,7 +161,8 @@ separately. Without them, monitor and dossier commands will fail.
 yarn test
 ```
 
-Runs all Vitest tests (config + state modules). No network access required.
+Runs all Vitest tests (config, state, harness, skill, integration). No network
+access required.
 
 ---
 
@@ -120,23 +170,35 @@ Runs all Vitest tests (config + state modules). No network access required.
 
 ```
 bin/
-  kleros-monitor.mjs    — CLI entry point; routes subcommands to main() exports
+  kleros-monitor.mjs        — CLI entry point; routes subcommands to main() exports
 lib/
-  doctor.mjs            — 7-check environment validator
-monitor.mjs             — Draw scanner; exports main(argv)
-dossier-builder.mjs     — Evidence downloader; exports main(argv)
-phase-c-executor.mjs    — Vote executor; exports main(argv)
-config.mjs              — Fail-closed config loader from .env
-constants.mjs           — Protocol constants (topics, period names, block timing)
-address.mjs             — Derives juror address from key file
+  doctor.mjs                — 7-check environment validator
+  harness.mjs               — Harness registry; getHarness(name) returns adapter or throws
+  skill.mjs                 — skill generate subcommand implementation
+harnesses/
+  hermes/
+    index.mjs               — Hermes adapter: renderSkill(config) → portable prompt string
+    veredict-skill.md       — Hermes prompt template ({{WORKDIR}} / {{HARNESS_SESSION_ID}})
+  claw/
+    README.md               — Claw invocation contract (design-only; no runtime adapter)
+    veredict-skill.md       — Claw prompt template [DESIGN ONLY]
+monitor.mjs                 — Draw scanner; exports main(argv)
+dossier-builder.mjs         — Evidence downloader; exports main(argv)
+phase-c-executor.mjs        — Vote executor; exports main(argv)
+config.mjs                  — Fail-closed config loader from .env
+constants.mjs               — Protocol constants (topics, period names, block timing)
+address.mjs                 — Derives juror address from key file
 helpers/
-  state.mjs             — State file + lock management
-  rpc.mjs               — JSON-RPC helpers with retry
-  ipfs.mjs              — IPFS fetch with gateway fallback
-  utils.mjs             — Shared utilities
+  state.mjs                 — State file + lock management
+  rpc.mjs                   — JSON-RPC helpers with retry
+  ipfs.mjs                  — IPFS fetch with gateway fallback
+  utils.mjs                 — Shared utilities
 test/
-  config.test.mjs       — Config module tests
-  state.test.mjs        — State derivation tests
+  config.test.mjs           — Config module tests
+  harness.test.mjs          — Harness registry + adapter + token-parity tests
+  skill.test.mjs            — Skill command unit tests
+  skill-integration.test.mjs — Integration tests for skill generate end-to-end
+  state.test.mjs            — State derivation tests
 ```
 
 ---

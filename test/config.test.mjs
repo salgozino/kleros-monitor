@@ -60,3 +60,29 @@ describe("loadConfig — sane defaults", () => {
     expect(cfg.RPC_URLS).toEqual(["https://my-rpc.example.com"]);
   });
 });
+
+// ── Task 4.5: HARNESS field ───────────────────────────────────────────────────
+
+describe("loadConfig — HARNESS field", () => {
+  const MINIMAL = { WORKDIR: "/x", COURT_ID: "34", KLEROS_JUROR_HOME: "/h" };
+
+  it('defaults to "hermes" when HARNESS is not set', () => {
+    const cfg = loadConfig(MINIMAL);
+    expect(cfg.HARNESS).toBe("hermes");
+  });
+
+  it('returns "claw" when HARNESS=claw (no validation at config layer)', () => {
+    const cfg = loadConfig({ ...MINIMAL, HARNESS: "claw" });
+    expect(cfg.HARNESS).toBe("claw");
+  });
+
+  it("trims whitespace from HARNESS value", () => {
+    const cfg = loadConfig({ ...MINIMAL, HARNESS: "  hermes  " });
+    expect(cfg.HARNESS).toBe("hermes");
+  });
+
+  it('treats empty string HARNESS as default "hermes"', () => {
+    const cfg = loadConfig({ ...MINIMAL, HARNESS: "" });
+    expect(cfg.HARNESS).toBe("hermes");
+  });
+});
