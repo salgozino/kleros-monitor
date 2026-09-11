@@ -13,20 +13,21 @@
 //
 // Safety: never touches the private key, never broadcasts anything. Read-only.
 
-import { existsSync, readFileSync } from "node:fs";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 
 import { encodeFunctionData, decodeFunctionResult } from "viem";
 
-import { CORE, RPC_URLS, WORKDIR } from "./config.mjs";
+import { CORE, WORKDIR, loadConfig } from "./config.mjs";
 import { TOPIC_DRAW, PERIOD_NAMES, INIT_LOOKBACK_BLOCKS } from "./constants.mjs";
 import { deriveJuror } from "./address.mjs";
 import ROUND_ABI from "./abis/round.mjs";
-import { rpc, rpcAny, rpcWithRetry, getLogs } from "./helpers/rpc.mjs";
+import { rpcWithRetry } from "./helpers/rpc.mjs";
 import { loadState, saveState, acquireLock, releaseLock } from "./helpers/state.mjs";
-import { sleep, fmtDate, hex } from "./helpers/utils.mjs";
+import { hex } from "./helpers/utils.mjs";
 import { getDisputeHeader } from "./helpers/dispute.mjs";
+import { dossierDir, dossierBuilt, pendingWork } from "./helpers/dossier-status.mjs";
+import { reconcile } from "./lib/dispatcher.mjs";
 
 const execFile = promisify(execFileCb);
 
@@ -168,6 +169,8 @@ function renderAlert(groups, isNewMap, opts = {}) {
 export async function main(argv = process.argv.slice(2)) {
   const statusOnly = argv.includes("--status");
   const gateMode = argv.includes("--gate");
+  const dispatchMode = argv.includes("--dispatch");
+  if (gateMode && dispatchMode) throw new Error("--gate and --dispatch are mutually exclusive");
 
   const headHex = await rpcWithRetry("eth_blockNumber", []);
   const head = parseInt(headHex, 16);
@@ -270,7 +273,41 @@ export async function main(argv = process.argv.slice(2)) {
   const footer = firstRun
     ? "(escaneo inicial: sorteos históricos encontrados dentro de la ventana de búsqueda)"
     : undefined;
-  if (!gateMode) process.stdout.write(renderAlert(fresh, isNewMap, { footer }));
+  // Gate and dispatch modes own stdout: the alert text would pollute the
+  // gate hash / the operator notification, so it is suppressed there.
+  if (!gateMode && !dispatchMode) process.stdout.write(renderAlert(fresh, isNewMap, { footer }));
+}
+
+// ------------------------------------------------------- known draws ------
+// Rebuild the list of draws we know about from persisted state, with a live
+// dispute header for each. Shared by --gate and --dispatch so both modes see
+// exactly the same set of (dispute, round) candidates.
+export async function collectKnownDraws({ state = loadState(), fetchHeader = getDisputeHeader } = {}) {
+  if (!state || Object.keys(state.seen).length === 0) return null;
+  const draws = [];
+  for (const k of Object.keys(state.seen)) {
+    const [d, r] = k.split("/");
+    let dispute = null;
+    try { dispute = await fetchHeader(d); } catch { /* transient RPC failure: treat as unknown */ }
+    draws.push({ disputeID: d, roundID: Number(r), voteIDs: state.seen[k], dispute });
+  }
+  return draws;
+}
+
+// Only actionable states belong in the gate view / dispatcher input. A draw
+// is actionable if:
+//   - it is in an active period (evidence=0, commit=1, vote=2), OR
+//   - its dossier is NOT yet complete (chunkCount===0 / no manifest), meaning
+//     Fase A (download) is still in progress and must keep retrying each tick.
+// A draw in appeal/execution with a complete dossier is NOT actionable
+// (nothing to do). Ruled disputes are never actionable.
+export function actionableDraws(draws) {
+  return draws.filter((g) => {
+    if (!g.dispute || g.dispute.ruled) return false;
+    if (g.dispute.period === 0 || g.dispute.period === 1 || g.dispute.period === 2) return true;
+    // period 3 (appeal) or 4 (execution): actionable only if dossier incomplete
+    return !dossierBuilt(dossierDir(WORKDIR, g.disputeID, g.roundID));
+  });
 }
 
 // ------------------------------------------------------- cron monitor gate --
@@ -282,46 +319,35 @@ export async function main(argv = process.argv.slice(2)) {
 //   (disputeID, roundID, period, ruled) per known draw.
 // Same view twice in a row -> silent no-op tick (no agent, no tokens).
 // Any transition (new draw, commit->vote, vote->appeal, ruled) -> agent wakes.
-function renderGateView(fresh) {
+//
+// While a draw has pending agent work (see helpers/dossier-status.mjs: Fase A
+// download not done, or Fase B decision.json missing in commit/vote), keep
+// re-waking the agent on a fixed cadence so a transient LLM/provider failure
+// (e.g. HTTP 503) cannot strand the dispute. The `retry` suffix rotates every
+// 5 minutes (deterministic, no per-second timestamp) so the gate hash changes
+// roughly once per window, forcing a re-run, but stays stable enough to avoid
+// spending tokens every single tick. Once the relevant work is done the suffix
+// becomes `done` and the view stabilizes -> agent suppressed (work done).
+export function renderGateView(fresh, { now = Date.now(), workdir = WORKDIR } = {}) {
   const lines = fresh.map((g) => {
     const period = g.dispute?.period ?? "?";
     const ruled = g.dispute?.ruled ? 1 : 0;
-    // While a draw is in an active voting period (commit=1 / vote=2) and the
-    // Fase B output (decision.json) is still missing, keep re-waking the agent
-    // on a fixed cadence so a transient LLM/provider failure (e.g. HTTP 503)
-    // cannot strand the dispute. The `retry` suffix rotates every 5 minutes
-    // (deterministic, no per-second timestamp) so the gate hash changes roughly
-    // once per window, forcing a re-run, but stays stable enough to avoid
-    // spending tokens every single tick. Once decision.json exists the suffix
-    // becomes `done` and the view stabilizes -> agent suppressed (work done).
-    const dir = `${WORKDIR}/dossiers/${g.disputeID}-r${g.roundID}`;
-    const hasDecision = existsSync(`${dir}/decision.json`);
-    // A draw is "work pending" (keep re-waking the agent) while EITHER:
-    //   - it is in commit/vote (period 1/2) and Fase B (decision.json) is
-    //     still missing, OR
-    //   - it is in evidence (period 0) and the dossier is not yet built
-    //     (no manifest, or chunkCount===0) so Fase A (download) must retry.
-    // The `retry` suffix rotates every 5 minutes (deterministic, no per-second
-    // timestamp) so the gate hash changes roughly once per window, forcing a
-    // re-run, but stays stable enough to avoid spending tokens every tick.
-    // Once the relevant work is done the suffix becomes `done` and the view
-    // stabilizes -> agent suppressed (work done).
-    const manifestPath = `${dir}/manifest.json`;
-    let dossierBuilt = false;
-    if (existsSync(manifestPath)) {
-      try {
-        const m = JSON.parse(readFileSync(manifestPath, "utf8"));
-        dossierBuilt = (m.chunkCount || 0) > 0;
-      } catch { dossierBuilt = false; }
-    }
-    const faseAPending = period === 0 && !dossierBuilt;
-    const faseBPending = (period === 1 || period === 2) && !hasDecision;
-    const pending = faseAPending || faseBPending;
-    const retry = pending ? ` retry=${Math.floor(Date.now() / 300000) % 1000}` : " done";
+    const { pending } = pendingWork(g.dispute, dossierDir(workdir, g.disputeID, g.roundID));
+    const retry = pending ? ` retry=${Math.floor(now / 300000) % 1000}` : " done";
     return `dispute=${g.disputeID} round=${g.roundID} period=${period} ruled=${ruled}${retry}`;
   });
   lines.sort();
   return lines.join("\n");
+}
+
+// --------------------------------------------------------- dispatch tick --
+// `--dispatch`: no_agent cron mode. One isolated agent per (dispute, round)
+// with pending work; see lib/dispatcher.mjs. Returns the event lines to print
+// (empty array = silent tick).
+export async function runDispatchTick({ draws, cfg = loadConfig(process.env), deps } = {}) {
+  const known = draws ?? (await collectKnownDraws());
+  if (!known) return [];
+  return reconcile(actionableDraws(known), cfg, deps);
 }
 
 // Standalone execution guard — runs when invoked directly via `node monitor.mjs`.
@@ -329,42 +355,24 @@ if (import.meta.url === new URL(process.argv[1], "file://").href) {
   acquireLock();
   const standaloneArgv = process.argv.slice(2);
   const standaloneGate = standaloneArgv.includes("--gate");
+  const standaloneDispatch = standaloneArgv.includes("--dispatch");
 
   main(standaloneArgv)
     .then(async () => {
+      if (standaloneDispatch) {
+        const lines = await runDispatchTick();
+        if (lines.length) process.stdout.write(lines.join("\n") + "\n");
+        return;
+      }
       // --gate: cron monitor_script mode. main() already computed `fresh` but it
       // is scoped inside; re-derive the gate view from persisted state instead.
       if (!standaloneGate) return;
-      const st = loadState();
-      if (!st || Object.keys(st.seen).length === 0) {
+      const known = await collectKnownDraws();
+      if (!known) {
         console.log("no-known-draws");
         return;
       }
-      const fresh = [];
-      for (const k of Object.keys(st.seen)) {
-        const [d, r] = k.split("/");
-        let dispute = null;
-        try { dispute = await getDisputeHeader(d); } catch {}
-        fresh.push({ disputeID: d, roundID: Number(r), voteIDs: st.seen[k], dispute });
-      }
-      // Only actionable states belong in the gate view. A draw is actionable if:
-      //   - it is in an active period (evidence=0, commit=1, vote=2), OR
-      //   - its dossier is NOT yet complete (chunkCount===0 / no manifest), meaning
-      //     Fase A (download) is still in progress and must keep retrying each tick.
-      // A draw in appeal/execution with a complete dossier is NOT actionable
-      // (nothing to do). This keeps the agent waking until evidence is downloaded.
-      const actionable = fresh.filter((g) => {
-        if (!g.dispute || g.dispute.ruled) return false;
-        if (g.dispute.period === 0 || g.dispute.period === 1 || g.dispute.period === 2) return true;
-        // period 3 (appeal) or 4 (execution): actionable only if dossier incomplete
-        const dir = `${WORKDIR}/dossiers/${g.disputeID}-r${g.roundID}`;
-        const manifestPath = `${dir}/manifest.json`;
-        if (!existsSync(manifestPath)) return true;
-        try {
-          const m = JSON.parse(readFileSync(manifestPath, "utf8"));
-          return (m.chunkCount || 0) === 0;
-        } catch { return true; }
-      });
+      const actionable = actionableDraws(known);
       process.stdout.write(actionable.length ? renderGateView(actionable) : "no-actionable-draws");
     })
     .catch((e) => {
