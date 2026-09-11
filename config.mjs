@@ -51,6 +51,7 @@ const DEFAULTS = {
   MAX_PARALLEL_AGENTS: 2,
   AGENT_SPAWN_COOLDOWN_S: 300,
   AGENT_TIMEOUT_S: 300, // one run is budgeted at ~2 min; must stay far below the commit window (~45 min)
+  AGENT_KILL_GRACE_S: 60, // seconds between SIGTERM and SIGKILL for a stuck agent
 };
 
 /**
@@ -64,7 +65,8 @@ const DEFAULTS = {
  *             PNK: string, SORT: string, DISPUTERESOLVER: string,
  *             DRT: string, EVIDENCE_CHAIN: string, HARNESS: string,
  *             AGENT_BIN: string, AGENT_ARGS: string[], MAX_PARALLEL_AGENTS: number,
- *             AGENT_SPAWN_COOLDOWN_S: number, AGENT_TIMEOUT_S: number }}
+ *             AGENT_SPAWN_COOLDOWN_S: number, AGENT_TIMEOUT_S: number,
+ *             AGENT_KILL_GRACE_S: number }}
  */
 export function loadConfig(env) {
   // Validate all required fields up front.
@@ -132,6 +134,7 @@ export function loadConfig(env) {
     MAX_PARALLEL_AGENTS: parsePositiveInt("MAX_PARALLEL_AGENTS"),
     AGENT_SPAWN_COOLDOWN_S: parsePositiveInt("AGENT_SPAWN_COOLDOWN_S"),
     AGENT_TIMEOUT_S: parsePositiveInt("AGENT_TIMEOUT_S"),
+    AGENT_KILL_GRACE_S: parsePositiveInt("AGENT_KILL_GRACE_S"),
   };
 }
 
@@ -156,3 +159,4 @@ export const AGENT_ARGS = _cfg.AGENT_ARGS;
 export const MAX_PARALLEL_AGENTS = _cfg.MAX_PARALLEL_AGENTS;
 export const AGENT_SPAWN_COOLDOWN_S = _cfg.AGENT_SPAWN_COOLDOWN_S;
 export const AGENT_TIMEOUT_S = _cfg.AGENT_TIMEOUT_S;
+export const AGENT_KILL_GRACE_S = _cfg.AGENT_KILL_GRACE_S;

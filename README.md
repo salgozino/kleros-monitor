@@ -95,7 +95,7 @@ The predicate lives in `helpers/dossier-status.mjs` and is shared with the
 
 - **Phase A** pending — dispute un-ruled and dossier not built
   (`manifest.json` missing or `chunkCount === 0`).
-- **Phase B** pending — period is commit (1) or vote (2) and `decision.json`
+- **Phase B** pending — period is commit (1) and `decision.json`
   does not exist.
 - Ruled disputes never have pending work.
 
@@ -142,6 +142,7 @@ The spawn is `AGENT_BIN AGENT_ARGS... "<prompt>" --usage-file <dir>/agent-usage.
 | `MAX_PARALLEL_AGENTS` | `2` | Live agents allowed across all draws |
 | `AGENT_SPAWN_COOLDOWN_S` | `300` | Minimum seconds between spawns for the same draw |
 | `AGENT_TIMEOUT_S` | `300` | Kill a still-running agent after this many seconds |
+| `AGENT_KILL_GRACE_S` | `60` | Seconds between SIGTERM and SIGKILL for a stuck agent |
 
 ### Hermes cron setup
 

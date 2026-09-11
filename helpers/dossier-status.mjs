@@ -7,8 +7,8 @@
 //
 // Phase A (download) is pending while the dispute is un-ruled and the
 // dossier is not built yet (no manifest.json, or chunkCount === 0).
-// Phase B (analysis) is pending while the dispute sits in commit (1) or
-// vote (2) and decision.json does not exist yet.
+// Phase B (analysis) is pending while the dispute sits in commit (1)
+// and decision.json does not exist yet.
 // Ruled disputes never have pending work.
 
 import { existsSync, readFileSync } from "node:fs";

@@ -322,7 +322,7 @@ export function actionableDraws(draws) {
 // Any transition (new draw, commit->vote, vote->appeal, ruled) -> agent wakes.
 //
 // While a draw has pending agent work (see helpers/dossier-status.mjs: Fase A
-// download not done, or Fase B decision.json missing in commit/vote), keep
+// download not done, or Fase B decision.json missing in commit), keep
 // re-waking the agent on a fixed cadence so a transient LLM/provider failure
 // (e.g. HTTP 503) cannot strand the dispute. The `retry` suffix rotates every
 // 5 minutes (deterministic, no per-second timestamp) so the gate hash changes
