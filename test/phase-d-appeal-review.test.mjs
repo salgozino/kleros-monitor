@@ -146,6 +146,47 @@ describe("validateDecision — decision.json shape guard (mirrors Phase C)", () 
 describe("phase-d-appeal-review — full classify() path with mocked RPC", () => {
   let workdir, home;
   const JUROR_ADDRESS = "0x606D2DD4Ca178349b327Ed7ACacf68058bd748Bc";
+  const DISPUTES_SEL = "0x564a565d"; // disputes(uint256)
+  const RULING_SEL = "0x1c3db16d"; // currentRuling(uint256)
+
+  // Mocked KlerosCore state, mutable per test. `fail` simulates an RPC
+  // outage for the given selector (every RPC URL rejects → rpcWithRetry throws).
+  let chain;
+  const word = (n) => BigInt(n).toString(16).padStart(64, "0");
+  function installFetchMock() {
+    vi.stubGlobal("fetch", vi.fn(async (_url, opts) => {
+      const body = JSON.parse(opts.body);
+      const data = body.params[0].data;
+      let result;
+      if (data.startsWith(DISPUTES_SEL)) {
+        if (chain.fail === "disputes") throw new Error("mock RPC down");
+        // (courtID=34, arbitrated=0x00..00, period, ruled=false, lastPeriodChange=1)
+        result = "0x" + word(34) + word(0) + word(chain.period) + word(0) + word(1);
+      } else if (data.startsWith(RULING_SEL)) {
+        if (chain.fail === "ruling") throw new Error("mock RPC down");
+        result = "0x" + word(chain.ruling) + word(chain.tied ? 1 : 0) + word(0);
+      } else {
+        throw new Error(`unexpected eth_call data in mock: ${data}`);
+      }
+      return { text: async () => JSON.stringify({ jsonrpc: "2.0", id: 1, result }) };
+    }));
+  }
+
+  async function run(argv) {
+    vi.resetModules();
+    // rpcWithRetry backs off with real sleeps (1.5s, 3s, 4.5s) between
+    // attempts; make them instant so RPC-failure tests do not time out.
+    vi.doMock("../helpers/utils.mjs", async (importOriginal) => ({
+      ...(await importOriginal()),
+      sleep: async () => {},
+    }));
+    const { main } = await import("../phase-d-appeal-review.mjs");
+    const logs = [];
+    const orig = process.stdout.write;
+    process.stdout.write = (s) => { logs.push(s); return true; };
+    try { await main(argv); } finally { process.stdout.write = orig; }
+    return logs.join("");
+  }
 
   beforeEach(() => {
     workdir = mkdtempSync(join(tmpdir(), "kleros-phase-d-e2e-"));
@@ -165,32 +206,9 @@ describe("phase-d-appeal-review — full classify() path with mocked RPC", () =>
     // will be choice=2 with tied=false — a genuine divergence.
     writeFileSync(join(workdir, "dossiers", "217-r0", "decision.json"), JSON.stringify({ dispute: 217, round: 0, choice: 1 }));
 
-    // Mock global fetch: eth_call to KlerosCore. Route by selector.
-    const DISPUTES_SEL = "0x564a565d"; // disputes(uint256)
-    const RULING_SEL = "0x1c3db16d"; // currentRuling(uint256)
-    vi.stubGlobal("fetch", vi.fn(async (_url, opts) => {
-      const body = JSON.parse(opts.body);
-      const data = body.params[0].data;
-      let result;
-      if (data.startsWith(DISPUTES_SEL)) {
-        // (courtID=34, arbitrated=0x00..00, period=3 [Appeal], ruled=false, lastPeriodChange=1)
-        result = "0x" +
-          "0".repeat(62) + "22" + // courtID = 0x22 = 34
-          "0".repeat(64) + // arbitrated
-          "0".repeat(63) + "3" + // period = 3 (Appeal)
-          "0".repeat(64) + // ruled = false
-          "0".repeat(63) + "1"; // lastPeriodChange = 1
-      } else if (data.startsWith(RULING_SEL)) {
-        // ruling=2, tied=false, overridden=false
-        result = "0x" +
-          "0".repeat(63) + "2" +
-          "0".repeat(64) +
-          "0".repeat(64);
-      } else {
-        throw new Error(`unexpected eth_call data in mock: ${data}`);
-      }
-      return { text: async () => JSON.stringify({ jsonrpc: "2.0", id: 1, result }) };
-    }));
+    // Default chain state: period=3 (Appeal), ruling=2, not tied.
+    chain = { period: 3, ruling: 2, tied: false, fail: null };
+    installFetchMock();
   });
 
   afterEach(() => {
@@ -294,5 +312,57 @@ describe("phase-d-appeal-review — full classify() path with mocked RPC", () =>
     expect(existsSync(markerPath)).toBe(true);
     const marker = JSON.parse(readFileSync(markerPath, "utf8"));
     expect(marker.needed).toBe(false);
+  });
+
+  it("tied panel (#217 scenario) is flagged for review even when our choice equals the reported ruling", async () => {
+    // 3-3 split → ruling=0 (refuse to arbitrate), tied=true. Our vote is 0 too:
+    // matching the ruling must NOT suppress the review while tied.
+    chain = { period: 3, ruling: 0, tied: true, fail: null };
+    writeFileSync(join(workdir, "dossiers", "217-r0", "decision.json"), JSON.stringify({ dispute: 217, round: 0, choice: 0 }));
+
+    const alert = await run([]);
+    expect(alert).toContain("Disputa 217");
+    expect(alert).toContain("tied=true");
+    expect(alert).toContain("EMPATADO");
+    expect(existsSync(join(workdir, "dossiers", "217-r0", "appeal-review.json"))).toBe(false);
+    expect(await run(["--gate"])).toContain("dispute=217 round=0 period=3 pending-review");
+  });
+
+  it.each([
+    [0, "evidence"], [1, "commit"], [2, "vote"], [4, "execution"],
+  ])("period=%i (%s) is not actionable: silent, no marker, gate idle", async (period) => {
+    chain = { period, ruling: 2, tied: false, fail: null };
+    expect(await run([])).toBe("");
+    expect(existsSync(join(workdir, "dossiers", "217-r0", "appeal-review.json"))).toBe(false);
+    expect(await run(["--gate"])).toBe("no-actionable-appeals");
+  });
+
+  it("never-voted round with NO dossier directory: skipped marker is still written (dir created)", async () => {
+    // Regression: a round we never voted in typically has no dossier dir at
+    // all. writeFileSync into a missing dir would throw and crash every tick.
+    rmSync(join(workdir, "dossiers", "217-r0"), { recursive: true, force: true });
+
+    const first = await run([]);
+    expect(first).toContain("never voted");
+    const marker = JSON.parse(readFileSync(join(workdir, "dossiers", "217-r0", "appeal-review.json"), "utf8"));
+    expect(marker.needed).toBe(false);
+    expect(await run(["--gate"])).toBe("no-actionable-appeals");
+  });
+
+  it("dispute-header RPC failure is a silent retry: no alert, no marker, gate idle", async () => {
+    // During an RPC outage the period is unknown for EVERY draw in state.seen,
+    // so alerting here would fire once per historical dispute. Stay silent.
+    chain = { period: 3, ruling: 2, tied: false, fail: "disputes" };
+    expect(await run([])).toBe("");
+    expect(existsSync(join(workdir, "dossiers", "217-r0", "appeal-review.json"))).toBe(false);
+    expect(await run(["--gate"])).toBe("no-actionable-appeals");
+  });
+
+  it("currentRuling RPC failure (dispute known to be in Appeal) is alerted and retried, no marker", async () => {
+    chain = { period: 3, ruling: 2, tied: false, fail: "ruling" };
+    const alert = await run([]);
+    expect(alert).toContain("Disputa 217");
+    expect(alert).toContain("currentRuling failed");
+    expect(existsSync(join(workdir, "dossiers", "217-r0", "appeal-review.json"))).toBe(false);
   });
 });

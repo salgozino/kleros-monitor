@@ -13,8 +13,9 @@
 //      ruling on-chain (KlerosCore.currentRuling).
 //   2b. If there is no decision.json at all (drawn but never voted), that
 //      fact is final once the dispute is in Appeal: writes a "skipped"
-//      marker and alerts exactly once. Transient RPC errors and malformed
-//      decision.json files are NOT marked — they are retried next tick.
+//      marker and alerts exactly once. A failed dispute-header read (RPC)
+//      is silently retried next tick; a failed currentRuling read or a
+//      malformed decision.json is alerted and retried, never marked.
 //   3. If our choice matches the ruling AND it isn't tied, nothing to review:
 //      writes a lightweight "coherent" marker (deterministic, no judgment
 //      involved) so the gate stops re-checking this dispute every tick.
@@ -31,18 +32,13 @@
 // anything, never calls fundAppeal. Financing an appeal is always a manual,
 // explicit decision by the human operator — this script only informs it.
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
 import { WORKDIR } from "./config.mjs";
 import { PERIOD_NAMES } from "./constants.mjs";
-import { deriveJuror } from "./address.mjs";
 import { loadState } from "./helpers/state.mjs";
 import { getDisputeHeader } from "./helpers/dispute.mjs";
 import { getCurrentRuling } from "./helpers/ruling.mjs";
-
-// KLEROS_JUROR_ADDRESS exists ONLY for testing (simulate another juror) —
-// same convention as monitor.mjs.
-const juror = (process.env.KLEROS_JUROR_ADDRESS ?? deriveJuror()).toLowerCase();
 
 function dossierDir(disputeID, roundID) {
   return `${WORKDIR}/dossiers/${disputeID}-r${roundID}`;
@@ -95,11 +91,15 @@ async function classify(draw) {
   const { disputeID, roundID } = draw;
   if (existsSync(markerPath(disputeID, roundID))) return null; // already handled
 
+  // A failed header read is a transient RPC problem, and at this point we do
+  // not even know whether the dispute is in Appeal. Alerting here would fire
+  // once per historical draw in state.seen during any RPC outage, so stay
+  // silent: no marker is written, the draw is simply re-checked next tick.
   let dispute;
   try {
     dispute = await getDisputeHeader(disputeID);
-  } catch (e) {
-    return { disputeID, roundID, error: `getDisputeHeader failed: ${e.message || e}` };
+  } catch {
+    return null;
   }
   if (dispute.period !== 3) return null; // only Appeal is actionable here
 
@@ -135,8 +135,15 @@ async function classify(draw) {
   return { disputeID, roundID, dispute, decision, ruling, reviewNeeded };
 }
 
+// Both markers may be the first file ever written under this dossier (a
+// never-voted round usually has no dossier directory at all), so create it.
+function writeMarker(disputeID, roundID, payload) {
+  mkdirSync(dossierDir(disputeID, roundID), { recursive: true });
+  writeFileSync(markerPath(disputeID, roundID), JSON.stringify(payload, null, 2));
+}
+
 function writeCoherentMarker(disputeID, roundID, ruling, decision) {
-  writeFileSync(markerPath(disputeID, roundID), JSON.stringify({
+  writeMarker(disputeID, roundID, {
     reviewed: true,
     needed: false,
     reason: "our choice matched the current ruling and it is not tied",
@@ -144,19 +151,19 @@ function writeCoherentMarker(disputeID, roundID, ruling, decision) {
     ruling: ruling.ruling,
     tied: ruling.tied,
     checkedAt: new Date().toISOString(),
-  }, null, 2));
+  });
 }
 
 // Written when we never voted in this round: nothing to review, and the
 // fact cannot change once the dispute is in Appeal, so the gate must stop
 // re-checking it. Deterministic — no judgment involved.
 function writeSkippedMarker(disputeID, roundID, reason) {
-  writeFileSync(markerPath(disputeID, roundID), JSON.stringify({
+  writeMarker(disputeID, roundID, {
     reviewed: true,
     needed: false,
     reason,
     checkedAt: new Date().toISOString(),
-  }, null, 2));
+  });
 }
 
 function renderWorkerAlert(pending) {

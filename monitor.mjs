@@ -42,8 +42,6 @@ async function getRoundInfo(disputeID, round) {
   return decodeFunctionResult({ abi: ROUND_ABI, data: res });
 }
 
-// getDisputeHeader now lives in helpers/dispute.mjs (shared with Phase D).
-
 // ------------------------------------------------------------- getLogs -----
 async function fetchDrawLogs(fromBlock, toBlock) {
   const params = [{
