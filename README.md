@@ -95,7 +95,7 @@ The predicate lives in `helpers/dossier-status.mjs` and is shared with the
 
 - **Phase A** pending — dispute un-ruled and dossier not built
   (`manifest.json` missing or `chunkCount === 0`).
-- **Phase B** pending — period is commit (1) or vote (2) and `decision.json`
+- **Phase B** pending — period is commit (1) and `decision.json`
   does not exist.
 - Ruled disputes never have pending work.
 

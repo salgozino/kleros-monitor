@@ -99,6 +99,7 @@ describe("loadConfig — agent dispatcher fields", () => {
     expect(cfg.MAX_PARALLEL_AGENTS).toBe(2);
     expect(cfg.AGENT_SPAWN_COOLDOWN_S).toBe(300);
     expect(cfg.AGENT_TIMEOUT_S).toBe(300);
+    expect(cfg.AGENT_KILL_GRACE_S).toBe(60);
   });
 
   it("parses AGENT_ARGS from comma or space separated strings", () => {
@@ -108,10 +109,11 @@ describe("loadConfig — agent dispatcher fields", () => {
   });
 
   it("parses numeric overrides and falls back on invalid values", () => {
-    const cfg = loadConfig({ ...MINIMAL, MAX_PARALLEL_AGENTS: "4", AGENT_SPAWN_COOLDOWN_S: "60", AGENT_TIMEOUT_S: "abc" });
+    const cfg = loadConfig({ ...MINIMAL, MAX_PARALLEL_AGENTS: "4", AGENT_SPAWN_COOLDOWN_S: "60", AGENT_TIMEOUT_S: "abc", AGENT_KILL_GRACE_S: "30" });
     expect(cfg.MAX_PARALLEL_AGENTS).toBe(4);
     expect(cfg.AGENT_SPAWN_COOLDOWN_S).toBe(60);
     expect(cfg.AGENT_TIMEOUT_S).toBe(300);
+    expect(cfg.AGENT_KILL_GRACE_S).toBe(30);
     expect(loadConfig({ ...MINIMAL, MAX_PARALLEL_AGENTS: "0" }).MAX_PARALLEL_AGENTS).toBe(2);
   });
 
