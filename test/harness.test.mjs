@@ -16,6 +16,9 @@ const FIXTURE_CONFIG = {
   KLEROS_JUROR_HOME: "/test/juror-home",
 };
 
+// Fixture draw assignment used across render tests.
+const FIXTURE_CTX = { dispute: "217", round: 0 };
+
 // ── Task 4.1: getHarness("hermes") returns adapter with correct shape ────────
 
 describe("getHarness — hermes adapter", () => {
@@ -53,32 +56,47 @@ describe("getHarness — unknown harness", () => {
 describe("renderSkill — token substitution", () => {
   it("contains the WORKDIR value from config", () => {
     const adapter = getHarness("hermes");
-    const output = adapter.renderSkill(FIXTURE_CONFIG);
+    const output = adapter.renderSkill(FIXTURE_CONFIG, FIXTURE_CTX);
     expect(output).toContain(FIXTURE_CONFIG.WORKDIR);
   });
 
   it("does not contain the raw {{WORKDIR}} placeholder", () => {
     const adapter = getHarness("hermes");
-    const output = adapter.renderSkill(FIXTURE_CONFIG);
+    const output = adapter.renderSkill(FIXTURE_CONFIG, FIXTURE_CTX);
     expect(output).not.toContain("{{WORKDIR}}");
   });
 
   it("does not contain any unresolved {{...}} placeholders", () => {
     const adapter = getHarness("hermes");
-    const output = adapter.renderSkill(FIXTURE_CONFIG);
+    const output = adapter.renderSkill(FIXTURE_CONFIG, FIXTURE_CTX);
     expect(output).not.toMatch(/\{\{[^}]+\}\}/);
   });
 
   it("does not contain any hardcoded /root/ paths", () => {
     const adapter = getHarness("hermes");
-    const output = adapter.renderSkill(FIXTURE_CONFIG);
+    const output = adapter.renderSkill(FIXTURE_CONFIG, FIXTURE_CTX);
     expect(output).not.toContain("/root/");
   });
 
   it("contains literal $HERMES_SESSION_ID for runtime capture", () => {
     const adapter = getHarness("hermes");
-    const output = adapter.renderSkill(FIXTURE_CONFIG);
+    const output = adapter.renderSkill(FIXTURE_CONFIG, FIXTURE_CTX);
     expect(output).toContain("$HERMES_SESSION_ID");
+  });
+
+  it("binds the prompt to the assigned dispute and round", () => {
+    const adapter = getHarness("hermes");
+    const output = adapter.renderSkill(FIXTURE_CONFIG, FIXTURE_CTX);
+    expect(output).toContain("ASSIGNED DRAW: dispute 217, round 0");
+    expect(output).not.toContain("{{DISPUTE}}");
+    expect(output).not.toContain("{{ROUND}}");
+  });
+
+  it("throws when ctx is missing or incomplete (no token may leak)", () => {
+    const adapter = getHarness("hermes");
+    expect(() => adapter.renderSkill(FIXTURE_CONFIG)).toThrow(/ctx/);
+    expect(() => adapter.renderSkill(FIXTURE_CONFIG, { dispute: "1" })).toThrow(/round/);
+    expect(() => adapter.renderSkill(FIXTURE_CONFIG, { round: 0 })).toThrow(/dispute/);
   });
 });
 
@@ -97,13 +115,13 @@ describe("renderSkill — token parity", () => {
 
     // Each token must NOT appear in the rendered output.
     const adapter = getHarness("hermes");
-    const output = adapter.renderSkill(FIXTURE_CONFIG);
+    const output = adapter.renderSkill(FIXTURE_CONFIG, FIXTURE_CTX);
 
     for (const token of uniqueTokens) {
       expect(output, `Unresolved token: ${token}`).not.toContain(token);
     }
 
-    // Sanity: the template must have had at least WORKDIR.
-    expect(uniqueTokens).toContain("{{WORKDIR}}");
+    // Sanity: the template must carry exactly the three supported tokens.
+    expect(uniqueTokens.sort()).toEqual(["{{DISPUTE}}", "{{ROUND}}", "{{WORKDIR}}"]);
   });
 });

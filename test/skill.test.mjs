@@ -95,7 +95,7 @@ describe("skill generate — happy path", () => {
     process.env.COURT_ID = "34";
     process.env.KLEROS_JUROR_HOME = "/tmp/juror-home";
 
-    const { exitCode, stdout } = await runSkill(["generate"]);
+    const { exitCode, stdout } = await runSkill(["generate", "--dispute", "5", "--round", "0"]);
 
     const outPath = join(tmpDir, "veredict-skill.md");
     expect(existsSync(outPath)).toBe(true);
@@ -108,11 +108,25 @@ describe("skill generate — happy path", () => {
     process.env.COURT_ID = "34";
     process.env.KLEROS_JUROR_HOME = "/tmp/juror-home";
 
-    await runSkill(["generate"]);
+    await runSkill(["generate", "--dispute", "5", "--round", "0"]);
 
     const content = readFileSync(join(tmpDir, "veredict-skill.md"), "utf8");
     expect(content).not.toMatch(/\{\{[^}]+\}\}/);
     expect(content).toContain(tmpDir); // WORKDIR substituted
+    expect(content).toContain("ASSIGNED DRAW: dispute 5, round 0");
+  });
+
+  it("--stdout prints the rendered prompt and writes no file", async () => {
+    process.env.WORKDIR = tmpDir;
+    process.env.COURT_ID = "34";
+    process.env.KLEROS_JUROR_HOME = "/tmp/juror-home";
+
+    const { exitCode, stdout } = await runSkill(["generate", "--dispute", "7", "--round", "1", "--stdout"]);
+
+    expect(exitCode).toBeNull();
+    expect(existsSync(join(tmpDir, "veredict-skill.md"))).toBe(false);
+    expect(stdout).toContain("ASSIGNED DRAW: dispute 7, round 1");
+    expect(stdout).not.toMatch(/\{\{[^}]+\}\}/);
   });
 });
 
@@ -134,6 +148,8 @@ describe("skill generate — error paths", () => {
   it("exits 1 and writes to stderr when harness is unknown", async () => {
     const { exitCode, stderr } = await runSkill([
       "generate",
+      "--dispute", "5",
+      "--round", "0",
       "--harness",
       "bogus-unknown",
     ]);
@@ -142,6 +158,20 @@ describe("skill generate — error paths", () => {
     expect(stderr).toMatch(/bogus-unknown/);
     // File must NOT be created on error.
     expect(existsSync(join(tmpDir, "veredict-skill.md"))).toBe(false);
+  });
+
+  it("exits 1 with usage when --dispute / --round are missing", async () => {
+    const { exitCode, stderr } = await runSkill(["generate"]);
+    expect(exitCode).toBe(1);
+    expect(stderr).toMatch(/--dispute/);
+    expect(stderr).toContain("Usage:");
+    expect(existsSync(join(tmpDir, "veredict-skill.md"))).toBe(false);
+  });
+
+  it("exits 1 when --round is not an integer", async () => {
+    const { exitCode, stderr } = await runSkill(["generate", "--dispute", "5", "--round", "abc"]);
+    expect(exitCode).toBe(1);
+    expect(stderr).toMatch(/integer/);
   });
 
   it("exits 1 and writes usage to stderr when no action provided", async () => {
