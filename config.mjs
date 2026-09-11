@@ -45,6 +45,12 @@ const DEFAULTS = {
   DISPUTERESOLVER: "0xb5526d022962a1fff6ed32c93e8b714c901f4323",
   DRT: "0x0cFBaCA5C72e7Ca5fFABE768E135654fB3F2a5A2", // DisputeTemplateRegistry
   EVIDENCE_CHAIN: "arbitrum-one", // chain name for `kleros evidence list --chain`
+  // Agent dispatcher (monitor.mjs --dispatch) — one agent process per draw.
+  AGENT_BIN: "hermes",
+  AGENT_ARGS: ["-z"], // Hermes one-shot mode: hermes -z "<prompt>" --usage-file <path>
+  MAX_PARALLEL_AGENTS: 2,
+  AGENT_SPAWN_COOLDOWN_S: 300,
+  AGENT_TIMEOUT_S: 300, // one run is budgeted at ~2 min; must stay far below the commit window (~45 min)
 };
 
 /**
@@ -56,7 +62,9 @@ const DEFAULTS = {
  * @returns {{ WORKDIR: string, COURT_ID: string, KLEROS_JUROR_HOME: string,
  *             RPC_URLS: string[], IPFS_GATEWAYS: string[], CORE: string,
  *             PNK: string, SORT: string, DISPUTERESOLVER: string,
- *             DRT: string, EVIDENCE_CHAIN: string, HARNESS: string }}
+ *             DRT: string, EVIDENCE_CHAIN: string, HARNESS: string,
+ *             AGENT_BIN: string, AGENT_ARGS: string[], MAX_PARALLEL_AGENTS: number,
+ *             AGENT_SPAWN_COOLDOWN_S: number, AGENT_TIMEOUT_S: number }}
  */
 export function loadConfig(env) {
   // Validate all required fields up front.
@@ -78,6 +86,19 @@ export function loadConfig(env) {
       if (raw.trim()) return [raw.trim()];
     }
     return DEFAULTS[key];
+  }
+
+  // Helper: positive integer with default (empty / NaN / <= 0 -> default).
+  function parsePositiveInt(key) {
+    const n = Number(env[key]);
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULTS[key];
+  }
+
+  // Helper: comma/space separated string -> array of non-empty tokens.
+  function parseArgs(key) {
+    const raw = env[key];
+    if (raw == null || raw.trim() === "") return DEFAULTS[key];
+    return raw.split(/[\s,]+/).filter(Boolean);
   }
 
   return {
@@ -104,6 +125,13 @@ export function loadConfig(env) {
     // Optional; defaults to "hermes". No validation here: unknown names
     // are caught at runtime by getHarness() in lib/harness.mjs.
     HARNESS: env.HARNESS?.trim() || "hermes",
+
+    // Agent dispatcher — see lib/dispatcher.mjs and README "Agent dispatch".
+    AGENT_BIN: env.AGENT_BIN?.trim() || DEFAULTS.AGENT_BIN,
+    AGENT_ARGS: parseArgs("AGENT_ARGS"),
+    MAX_PARALLEL_AGENTS: parsePositiveInt("MAX_PARALLEL_AGENTS"),
+    AGENT_SPAWN_COOLDOWN_S: parsePositiveInt("AGENT_SPAWN_COOLDOWN_S"),
+    AGENT_TIMEOUT_S: parsePositiveInt("AGENT_TIMEOUT_S"),
   };
 }
 
@@ -123,3 +151,8 @@ export const DISPUTERESOLVER = _cfg.DISPUTERESOLVER;
 export const DRT = _cfg.DRT;
 export const EVIDENCE_CHAIN = _cfg.EVIDENCE_CHAIN;
 export const HARNESS = _cfg.HARNESS;
+export const AGENT_BIN = _cfg.AGENT_BIN;
+export const AGENT_ARGS = _cfg.AGENT_ARGS;
+export const MAX_PARALLEL_AGENTS = _cfg.MAX_PARALLEL_AGENTS;
+export const AGENT_SPAWN_COOLDOWN_S = _cfg.AGENT_SPAWN_COOLDOWN_S;
+export const AGENT_TIMEOUT_S = _cfg.AGENT_TIMEOUT_S;

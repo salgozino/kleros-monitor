@@ -23,7 +23,13 @@ never silently treated as free or backfilled with a guess.
 
 Usage (no args, reads $HERMES_SESSION_ID):
     python3 query-own-session-usage.py
+
+Fallback: under `hermes -z` (one-shot mode, as launched by the dispatcher)
+$HERMES_SESSION_ID may be unset. In that case the session id is read from
+the JSON file pointed to by $KLEROS_AGENT_USAGE_FILE (written by Hermes via
+--usage-file), looking for a `session_id` key at the top level or nested.
 """
+import json
 import os
 import sqlite3
 import sys
@@ -32,10 +38,50 @@ from pathlib import Path
 STATE_DB = Path.home() / ".hermes" / "state.db"
 
 
-def main():
+def _find_session_id(obj, depth=0):
+    """Depth-first search for a non-empty string under a `session_id` key."""
+    if depth > 6:
+        return ""
+    if isinstance(obj, dict):
+        val = obj.get("session_id")
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+        for child in obj.values():
+            found = _find_session_id(child, depth + 1)
+            if found:
+                return found
+    elif isinstance(obj, list):
+        for child in obj:
+            found = _find_session_id(child, depth + 1)
+            if found:
+                return found
+    return ""
+
+
+def _session_id_from_usage_file():
+    path = os.environ.get("KLEROS_AGENT_USAGE_FILE", "").strip()
+    if not path or not os.path.isfile(path):
+        return ""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return ""
+    return _find_session_id(data)
+
+
+def resolve_session_id():
     session_id = os.environ.get("HERMES_SESSION_ID", "").strip()
+    if session_id:
+        return session_id
+    return _session_id_from_usage_file()
+
+
+def main():
+    session_id = resolve_session_id()
     if not session_id:
-        print("ERROR: $HERMES_SESSION_ID is not set in this environment.",
+        print("ERROR: $HERMES_SESSION_ID is not set in this environment "
+              "and no session_id was found in $KLEROS_AGENT_USAGE_FILE.",
               file=sys.stderr)
         sys.exit(1)
 

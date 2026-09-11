@@ -137,35 +137,35 @@ describe("skill generate — happy path (hermes)", () => {
   });
 
   it("writes veredict-skill.md to WORKDIR", async () => {
-    const { exitCode } = await runMain(["generate", "--harness", "hermes"]);
+    const { exitCode } = await runMain(["generate", "--dispute", "5", "--round", "0", "--harness", "hermes"]);
     expect(exitCode).toBe(0);
     const outPath = join(workdir.dir, "veredict-skill.md");
     expect(existsSync(outPath)).toBe(true);
   });
 
   it("prints the output path to stdout", async () => {
-    const { exitCode, stdout } = await runMain(["generate", "--harness", "hermes"]);
+    const { exitCode, stdout } = await runMain(["generate", "--dispute", "5", "--round", "0", "--harness", "hermes"]);
     expect(exitCode).toBe(0);
     const outPath = join(workdir.dir, "veredict-skill.md");
     expect(stdout.trim()).toBe(outPath);
   });
 
   it("rendered content has no unresolved {{...}} tokens", async () => {
-    await runMain(["generate", "--harness", "hermes"]);
+    await runMain(["generate", "--dispute", "5", "--round", "0", "--harness", "hermes"]);
     const outPath = join(workdir.dir, "veredict-skill.md");
     const content = readFileSync(outPath, "utf8");
     expect(content).not.toMatch(/\{\{[^}]+\}\}/);
   });
 
   it("rendered content does not contain /root/ (portable path)", async () => {
-    await runMain(["generate", "--harness", "hermes"]);
+    await runMain(["generate", "--dispute", "5", "--round", "0", "--harness", "hermes"]);
     const outPath = join(workdir.dir, "veredict-skill.md");
     const content = readFileSync(outPath, "utf8");
     expect(content).not.toContain("/root/");
   });
 
   it("rendered content contains WORKDIR value", async () => {
-    await runMain(["generate", "--harness", "hermes"]);
+    await runMain(["generate", "--dispute", "5", "--round", "0", "--harness", "hermes"]);
     const outPath = join(workdir.dir, "veredict-skill.md");
     const content = readFileSync(outPath, "utf8");
     expect(content).toContain(workdir.dir);
@@ -186,23 +186,23 @@ describe("skill generate — unknown harness", () => {
   });
 
   it("exits with code 1 for an unknown harness", async () => {
-    const { exitCode } = await runMain(["generate", "--harness", "claw"]);
+    const { exitCode } = await runMain(["generate", "--dispute", "5", "--round", "0", "--harness", "claw"]);
     expect(exitCode).toBe(1);
   });
 
   it("writes error to stderr naming the harness", async () => {
-    const { stderr } = await runMain(["generate", "--harness", "claw"]);
+    const { stderr } = await runMain(["generate", "--dispute", "5", "--round", "0", "--harness", "claw"]);
     expect(stderr).toMatch(/claw/i);
   });
 
   it("does NOT write veredict-skill.md when harness is unknown", async () => {
-    await runMain(["generate", "--harness", "claw"]);
+    await runMain(["generate", "--dispute", "5", "--round", "0", "--harness", "claw"]);
     const outPath = join(workdir.dir, "veredict-skill.md");
     expect(existsSync(outPath)).toBe(false);
   });
 
   it("exits with code 1 for a completely bogus harness name", async () => {
-    const { exitCode, stderr } = await runMain(["generate", "--harness", "bogus-xyz"]);
+    const { exitCode, stderr } = await runMain(["generate", "--dispute", "5", "--round", "0", "--harness", "bogus-xyz"]);
     expect(exitCode).toBe(1);
     expect(stderr).toMatch(/bogus-xyz/i);
   });
@@ -226,7 +226,7 @@ describe("skill generate — re-run overwrites existing file", () => {
     // Write a sentinel file first.
     writeFileSync(outPath, "old content", "utf8");
 
-    const { stderr } = await runMain(["generate", "--harness", "hermes"]);
+    const { stderr } = await runMain(["generate", "--dispute", "5", "--round", "0", "--harness", "hermes"]);
     expect(stderr).toMatch(/already exists|overwriting/i);
   });
 
@@ -234,7 +234,7 @@ describe("skill generate — re-run overwrites existing file", () => {
     const outPath = join(workdir.dir, "veredict-skill.md");
     writeFileSync(outPath, "SENTINEL_OLD_CONTENT", "utf8");
 
-    const { exitCode } = await runMain(["generate", "--harness", "hermes"]);
+    const { exitCode } = await runMain(["generate", "--dispute", "5", "--round", "0", "--harness", "hermes"]);
     expect(exitCode).toBe(0);
 
     const content = readFileSync(outPath, "utf8");
@@ -298,7 +298,7 @@ describe("skill generate — token parity (integration)", () => {
   });
 
   it("output file has no unresolved {{...}} tokens (parity with hermes template)", async () => {
-    const { exitCode } = await runMain(["generate", "--harness", "hermes"]);
+    const { exitCode } = await runMain(["generate", "--dispute", "5", "--round", "0", "--harness", "hermes"]);
     expect(exitCode).toBe(0);
     const outPath = join(workdir.dir, "veredict-skill.md");
     const content = readFileSync(outPath, "utf8");

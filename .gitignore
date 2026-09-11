@@ -14,7 +14,7 @@ state*.json
 agent-journal.jsonl
 
 # Dependencies
-node_modules/
+node_modules
 package-lock.json
 .yarn/install-state.gz
 
