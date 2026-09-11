@@ -238,15 +238,16 @@ export async function main(argv = process.argv.slice(2)) {
   }
 
   // Re-alert while a KNOWN draw (from persisted state) sits inside an actionable
-  // window (un-ruled + commit=1 or vote=2): a missed alert must never cost us a
-  // case. Incremental scans don't re-see old draws, so we check them explicitly.
+  // window (un-ruled + commit=1): a missed alert must never cost us a case.
+  // Incremental scans don't re-see old draws, so we check them explicitly.
+  // NOTE: vote (period=2) is NOT re-alerted — Phase C handles it deterministically.
   const alreadyAlerted = new Set(fresh.map((g) => `${g.disputeID}/${g.roundID}`));
   for (const k of Object.keys(state.seen)) {
     if (alreadyAlerted.has(k)) continue;
     const [d, r] = k.split("/");
     try {
       const dispute = await getDisputeHeader(d);
-      if (!dispute.ruled && (dispute.period === 1 || dispute.period === 2)) {
+      if (!dispute.ruled && dispute.period === 1) {
         fresh.push({ disputeID: d, roundID: Number(r), voteIDs: state.seen[k], events: [], dispute });
       }
     } catch { /* transient RPC failure on one dispute must not kill the tick */ }
@@ -286,27 +287,11 @@ function renderGateView(fresh) {
   const lines = fresh.map((g) => {
     const period = g.dispute?.period ?? "?";
     const ruled = g.dispute?.ruled ? 1 : 0;
-    // While a draw is in an active voting period (commit=1 / vote=2) and the
-    // Fase B output (decision.json) is still missing, keep re-waking the agent
-    // on a fixed cadence so a transient LLM/provider failure (e.g. HTTP 503)
-    // cannot strand the dispute. The `retry` suffix rotates every 5 minutes
-    // (deterministic, no per-second timestamp) so the gate hash changes roughly
-    // once per window, forcing a re-run, but stays stable enough to avoid
-    // spending tokens every single tick. Once decision.json exists the suffix
-    // becomes `done` and the view stabilizes -> agent suppressed (work done).
     const dir = `${WORKDIR}/dossiers/${g.disputeID}-r${g.roundID}`;
-    const hasDecision = existsSync(`${dir}/decision.json`);
-    // A draw is "work pending" (keep re-waking the agent) while EITHER:
-    //   - it is in commit/vote (period 1/2) and Fase B (decision.json) is
-    //     still missing, OR
-    //   - it is in evidence (period 0) and the dossier is not yet built
-    //     (no manifest, or chunkCount===0) so Fase A (download) must retry.
-    // The `retry` suffix rotates every 5 minutes (deterministic, no per-second
-    // timestamp) so the gate hash changes roughly once per window, forcing a
-    // re-run, but stays stable enough to avoid spending tokens every tick.
-    // Once the relevant work is done the suffix becomes `done` and the view
-    // stabilizes -> agent suppressed (work done).
     const manifestPath = `${dir}/manifest.json`;
+    const hasDecision = existsSync(`${dir}/decision.json`);
+
+    // --- dossier built? (Fase A completeness) ---
     let dossierBuilt = false;
     if (existsSync(manifestPath)) {
       try {
@@ -314,11 +299,28 @@ function renderGateView(fresh) {
         dossierBuilt = (m.chunkCount || 0) > 0;
       } catch { dossierBuilt = false; }
     }
+
+    // --- work-pending flags (only when the AGENT must act) ---
+    // Period 0 (evidence): agent must download dossier (Fase A).
     const faseAPending = period === 0 && !dossierBuilt;
-    const faseBPending = (period === 1 || period === 2) && !hasDecision;
+    // Period 1 (commit): agent must write decision.json (Fase B).
+    // This is the ONLY period where we retry a missing decision — the LLM
+    // actually works here. Once decision.json exists → done, hash stabilises.
+    const faseBPending = period === 1 && !hasDecision;
+    // Period 2 (vote): Phase C is fully deterministic (commit/reveal).
+    // The agent does NOT act here — never retry, never wake it.
+    // Period 3/4 (appeal/execution): nothing to do.
+
     const pending = faseAPending || faseBPending;
-    const retry = pending ? ` retry=${Math.floor(Date.now() / 300000) % 1000}` : " done";
-    return `dispute=${g.disputeID} round=${g.roundID} period=${period} ruled=${ruled}${retry}`;
+
+    // Suffix logic:
+    //   - pending AND agent hasn't finished → rotate every 5 min (retry).
+    //     This covers transient LLM/provider failures (HTTP 503 etc.) without
+    //     burning tokens every single tick.
+    //   - NOT pending (work done or irrelevant period) → stable "done".
+    //     Hash does not change → agent stays suppressed.
+    const suffix = pending ? ` retry=${Math.floor(Date.now() / 300000) % 1000}` : " done";
+    return `dispute=${g.disputeID} round=${g.roundID} period=${period} ruled=${ruled}${suffix}`;
   });
   lines.sort();
   return lines.join("\n");
@@ -348,14 +350,15 @@ if (import.meta.url === new URL(process.argv[1], "file://").href) {
         fresh.push({ disputeID: d, roundID: Number(r), voteIDs: st.seen[k], dispute });
       }
       // Only actionable states belong in the gate view. A draw is actionable if:
-      //   - it is in an active period (evidence=0, commit=1, vote=2), OR
+      //   - it is in evidence (period=0) or commit (period=1), where the agent
+      //     must act (Fase A download or Fase B decision), OR
       //   - its dossier is NOT yet complete (chunkCount===0 / no manifest), meaning
       //     Fase A (download) is still in progress and must keep retrying each tick.
-      // A draw in appeal/execution with a complete dossier is NOT actionable
-      // (nothing to do). This keeps the agent waking until evidence is downloaded.
+      // Period 2 (vote) is NOT actionable — Phase C is fully deterministic there.
+      // A draw in appeal/execution with a complete dossier is also NOT actionable.
       const actionable = fresh.filter((g) => {
         if (!g.dispute || g.dispute.ruled) return false;
-        if (g.dispute.period === 0 || g.dispute.period === 1 || g.dispute.period === 2) return true;
+        if (g.dispute.period === 0 || g.dispute.period === 1) return true;
         // period 3 (appeal) or 4 (execution): actionable only if dossier incomplete
         const dir = `${WORKDIR}/dossiers/${g.disputeID}-r${g.roundID}`;
         const manifestPath = `${dir}/manifest.json`;
