@@ -107,10 +107,34 @@ describe("phase-d-appeal-review — filesystem integration (temp WORKDIR, no dra
     vi.resetModules();
     const { main } = await import("../phase-d-appeal-review.mjs");
     const logs = [];
-    const orig = console.log;
-    console.log = (...a) => logs.push(a.join(" "));
-    try { await main(["--gate"]); } finally { console.log = orig; }
-    expect(logs.join("\n")).toContain("no-known-draws");
+    const orig = process.stdout.write;
+    process.stdout.write = (s) => { logs.push(s); return true; };
+    try { await main(["--gate"]); } finally { process.stdout.write = orig; }
+    expect(logs.join("")).toBe("no-known-draws");
+  });
+});
+
+describe("validateDecision — decision.json shape guard (mirrors Phase C)", () => {
+  it("accepts a well-formed decision for the same dispute/round", async () => {
+    const { validateDecision } = await import("../phase-d-appeal-review.mjs");
+    expect(validateDecision({ dispute: 217, round: 0, choice: 1 }, "217", 0)).toBeNull();
+  });
+
+  it("rejects a non-numeric choice", async () => {
+    const { validateDecision } = await import("../phase-d-appeal-review.mjs");
+    expect(validateDecision({ dispute: 217, round: 0, choice: "1" }, "217", 0)).toMatch(/not a number/);
+    expect(validateDecision({ dispute: 217, round: 0 }, "217", 0)).toMatch(/not a number/);
+  });
+
+  it("rejects a decision.json that belongs to another dispute or round", async () => {
+    const { validateDecision } = await import("../phase-d-appeal-review.mjs");
+    expect(validateDecision({ dispute: 218, round: 0, choice: 1 }, "217", 0)).toMatch(/mismatch/);
+    expect(validateDecision({ dispute: 217, round: 1, choice: 1 }, "217", 0)).toMatch(/mismatch/);
+  });
+
+  it("rejects non-object payloads", async () => {
+    const { validateDecision } = await import("../phase-d-appeal-review.mjs");
+    expect(validateDecision(null, "217", 0)).toMatch(/not an object/);
   });
 });
 
@@ -205,6 +229,52 @@ describe("phase-d-appeal-review — full classify() path with mocked RPC", () =>
     try { await main(["--gate"]); } finally { process.stdout.write = orig; }
 
     expect(logs.join("")).toContain("dispute=217 round=0 period=3 pending-review");
+  });
+
+  it("never-voted round in Appeal: alerts once, writes a skipped marker, then goes silent", async () => {
+    // Remove decision.json → we were drawn but never voted. That can't
+    // change once the dispute is in Appeal, so it must NOT be retried.
+    rmSync(join(workdir, "dossiers", "217-r0", "decision.json"));
+
+    vi.resetModules();
+    const { main } = await import("../phase-d-appeal-review.mjs");
+
+    const capture = async (argv) => {
+      const logs = [];
+      const orig = process.stdout.write;
+      process.stdout.write = (s) => { logs.push(s); return true; };
+      try { await main(argv); } finally { process.stdout.write = orig; }
+      return logs.join("");
+    };
+
+    const first = await capture([]);
+    expect(first).toContain("Disputa 217");
+    expect(first).toContain("never voted");
+
+    const markerPath = join(workdir, "dossiers", "217-r0", "appeal-review.json");
+    expect(existsSync(markerPath)).toBe(true);
+    const marker = JSON.parse(readFileSync(markerPath, "utf8"));
+    expect(marker.needed).toBe(false);
+    expect(marker.reason).toMatch(/never voted/);
+
+    // Second tick: marker present → nothing pending, both modes silent/idle.
+    expect(await capture([])).toBe("");
+    expect(await capture(["--gate"])).toBe("no-actionable-appeals");
+  });
+
+  it("malformed decision.json (dispute mismatch) is an error: alerted, retried, no marker written", async () => {
+    writeFileSync(join(workdir, "dossiers", "217-r0", "decision.json"), JSON.stringify({ dispute: 999, round: 0, choice: 1 }));
+
+    vi.resetModules();
+    const { main } = await import("../phase-d-appeal-review.mjs");
+
+    const logs = [];
+    const orig = process.stdout.write;
+    process.stdout.write = (s) => { logs.push(s); return true; };
+    try { await main([]); } finally { process.stdout.write = orig; }
+
+    expect(logs.join("")).toContain("mismatch");
+    expect(existsSync(join(workdir, "dossiers", "217-r0", "appeal-review.json"))).toBe(false);
   });
 
   it("does NOT flag a case where our choice matches the ruling and it isn't tied — writes coherent marker instead", async () => {

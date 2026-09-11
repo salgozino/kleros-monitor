@@ -11,6 +11,10 @@
 //   2. For each known dispute/round sitting in Appeal, reads our own
 //      decision.json (Phase B's recorded choice) and the CURRENT provisional
 //      ruling on-chain (KlerosCore.currentRuling).
+//   2b. If there is no decision.json at all (drawn but never voted), that
+//      fact is final once the dispute is in Appeal: writes a "skipped"
+//      marker and alerts exactly once. Transient RPC errors and malformed
+//      decision.json files are NOT marked — they are retried next tick.
 //   3. If our choice matches the ruling AND it isn't tied, nothing to review:
 //      writes a lightweight "coherent" marker (deterministic, no judgment
 //      involved) so the gate stops re-checking this dispute every tick.
@@ -60,6 +64,19 @@ export function needsReview(ourChoice, ruling) {
   return Number(ruling.ruling) !== Number(ourChoice);
 }
 
+// Mirrors phase-c-executor.mjs's readDecision() guard: decision.json must
+// carry a numeric choice and identify the same dispute/round it sits under,
+// so a stray file copied from another dossier can never be compared.
+// Returns an error string, or null when the shape is valid.
+export function validateDecision(decision, disputeID, roundID) {
+  if (!decision || typeof decision !== "object") return "decision.json is not an object";
+  if (typeof decision.choice !== "number") return `decision.json choice is not a number (got ${JSON.stringify(decision.choice)})`;
+  if (String(decision.dispute) !== String(disputeID) || Number(decision.round) !== Number(roundID)) {
+    return `decision.json dispute/round mismatch (${decision.dispute}/${decision.round}) — refusing to compare`;
+  }
+  return null;
+}
+
 // Loads every known (disputeID, roundID) we were drawn in, from the SHARED
 // state file (read-only). Does not mutate it.
 function knownDraws() {
@@ -87,9 +104,13 @@ async function classify(draw) {
   if (dispute.period !== 3) return null; // only Appeal is actionable here
 
   if (!existsSync(decisionPath(disputeID, roundID))) {
-    // We were drawn but never recorded a decision (shouldn't normally
-    // happen if Phase B ran) — surface it, but don't crash the tick.
-    return { disputeID, roundID, dispute, error: "no decision.json found — Phase B may not have completed" };
+    // We were drawn but never recorded a decision. Once the dispute is in
+    // Appeal that can no longer change (the vote window is closed), so
+    // retrying every tick is pointless. Mark it as skipped (deterministic
+    // fact, no judgment involved) and surface it exactly once.
+    const reason = "no decision.json found — we never voted in this round";
+    writeSkippedMarker(disputeID, roundID, reason);
+    return { disputeID, roundID, dispute, skipped: reason };
   }
   let decision;
   try {
@@ -97,6 +118,11 @@ async function classify(draw) {
   } catch (e) {
     return { disputeID, roundID, dispute, error: `decision.json unreadable: ${e.message || e}` };
   }
+  // Same shape check Phase C applies before acting: a malformed or
+  // mismatched decision.json is an operator problem, so it stays an error
+  // (re-alerted each tick until fixed) rather than being silently compared.
+  const shapeError = validateDecision(decision, disputeID, roundID);
+  if (shapeError) return { disputeID, roundID, dispute, error: shapeError };
 
   let ruling;
   try {
@@ -121,6 +147,18 @@ function writeCoherentMarker(disputeID, roundID, ruling, decision) {
   }, null, 2));
 }
 
+// Written when we never voted in this round: nothing to review, and the
+// fact cannot change once the dispute is in Appeal, so the gate must stop
+// re-checking it. Deterministic — no judgment involved.
+function writeSkippedMarker(disputeID, roundID, reason) {
+  writeFileSync(markerPath(disputeID, roundID), JSON.stringify({
+    reviewed: true,
+    needed: false,
+    reason,
+    checkedAt: new Date().toISOString(),
+  }, null, 2));
+}
+
 function renderWorkerAlert(pending) {
   const lines = [];
   lines.push("🔎 REVISIÓN POST-RULING (posible apelación) — Kleros Court V2 🔎");
@@ -129,6 +167,13 @@ function renderWorkerAlert(pending) {
     lines.push(`━━━ Disputa ${p.disputeID} · Ronda ${p.roundID} ━━━`);
     if (p.error) {
       lines.push(`⚠️ ${p.error}`);
+      lines.push("");
+      continue;
+    }
+    if (p.skipped) {
+      lines.push(`⏭️ ${p.skipped}`);
+      lines.push("   Esta disputa entró en Apelación sin voto nuestro — no hay nada que revisar.");
+      lines.push("   Queda marcada; no se vuelve a avisar.");
       lines.push("");
       continue;
     }
@@ -180,7 +225,7 @@ export async function main(argv = process.argv.slice(2)) {
 
   const draws = knownDraws();
   if (!draws.length) {
-    if (gateMode) console.log("no-known-draws");
+    if (gateMode) process.stdout.write("no-known-draws");
     return;
   }
 
@@ -195,7 +240,9 @@ export async function main(argv = process.argv.slice(2)) {
   // chain-data comparison — so the script itself may write this marker.
   const pending = [];
   for (const r of results) {
-    if (r.error) { pending.push(r); continue; }
+    // error: transient (RPC) or operator-fixable — retried next tick.
+    // skipped: marker already written, alerted exactly once (this tick).
+    if (r.error || r.skipped) { pending.push(r); continue; }
     if (!r.reviewNeeded) {
       writeCoherentMarker(r.disputeID, r.roundID, r.ruling, r.decision);
       continue;
