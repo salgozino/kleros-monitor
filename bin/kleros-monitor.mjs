@@ -3,6 +3,7 @@
 //
 // Subcommands:
 //   monitor | watch        — scan for new draws (kleros-draw-monitor)
+//   dispatch               — alias for `monitor --dispatch` (one agent per draw)
 //   dossier | evidence-download — build evidence dossier for a dispute
 //   vote-executor          — run the deterministic vote executor
 //   doctor                 — run environment health checks
@@ -12,11 +13,12 @@
 //
 // Usage:
 //   kleros-monitor [monitor|watch] [flags]
+//   kleros-monitor dispatch
 //   kleros-monitor dossier <disputeID> [round] [flags]
 //   kleros-monitor evidence-download <disputeID> [round] [flags]
 //   kleros-monitor vote-executor [flags]
 //   kleros-monitor doctor [--json]
-//   kleros-monitor skill generate [--harness <name>]
+//   kleros-monitor skill generate --dispute <id> --round <n> [--harness <name>] [--stdout]
 //   kleros-monitor --help | -h
 
 const USAGE = `
@@ -24,7 +26,11 @@ Usage: kleros-monitor <subcommand> [flags]
 
 Subcommands:
   monitor, watch           Scan for new draws (Kleros Draw Monitor).
-                           Flags: --status, --gate
+                           Flags: --status, --gate, --dispatch
+                           (--gate and --dispatch are mutually exclusive)
+  dispatch                 Alias for \`monitor --dispatch\`: scan, then spawn one
+                           isolated agent per (dispute, round) with pending work.
+                           Empty stdout = nothing happened this tick.
   dossier, evidence-download
                            Build evidence dossier for a dispute.
                            Args: <disputeID> [round]
@@ -32,9 +38,10 @@ Subcommands:
                            Env: PHASE_C_BROADCAST=1 to broadcast on-chain.
   doctor                   Run environment health checks.
                            Flags: --json
-  skill generate           Render and write the verdict-skill prompt to
-                           \$WORKDIR/veredict-skill.md.
-                           Options: --harness <name> (default: hermes)
+  skill generate           Render the verdict-skill prompt for ONE draw and write
+                           it to \$WORKDIR/veredict-skill.md (or print with --stdout).
+                           Required: --dispute <id> --round <n>
+                           Options: --harness <name> (default: hermes), --stdout
 
 Options:
   --help, -h               Show this help and exit.
@@ -47,6 +54,20 @@ switch (subcommand) {
   case "watch": {
     const { main } = await import("../monitor.mjs");
     await main(rest);
+    break;
+  }
+
+  case "dispatch": {
+    // Standalone guard in monitor.mjs owns the lock + stdout contract, so
+    // re-exec the module as a direct script rather than calling main().
+    const { execFileSync } = await import("node:child_process");
+    const { fileURLToPath } = await import("node:url");
+    const monitorPath = fileURLToPath(new URL("../monitor.mjs", import.meta.url));
+    try {
+      execFileSync(process.execPath, [monitorPath, "--dispatch", ...rest], { stdio: "inherit" });
+    } catch (err) {
+      process.exit(typeof err.status === "number" ? err.status : 1);
+    }
     break;
   }
 
