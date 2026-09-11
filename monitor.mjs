@@ -241,15 +241,16 @@ export async function main(argv = process.argv.slice(2)) {
   }
 
   // Re-alert while a KNOWN draw (from persisted state) sits inside an actionable
-  // window (un-ruled + commit=1 or vote=2): a missed alert must never cost us a
-  // case. Incremental scans don't re-see old draws, so we check them explicitly.
+  // window (un-ruled + commit=1): a missed alert must never cost us a case.
+  // Incremental scans don't re-see old draws, so we check them explicitly.
+  // NOTE: vote (period=2) is NOT re-alerted — Phase C handles it deterministically.
   const alreadyAlerted = new Set(fresh.map((g) => `${g.disputeID}/${g.roundID}`));
   for (const k of Object.keys(state.seen)) {
     if (alreadyAlerted.has(k)) continue;
     const [d, r] = k.split("/");
     try {
       const dispute = await getDisputeHeader(d);
-      if (!dispute.ruled && (dispute.period === 1 || dispute.period === 2)) {
+      if (!dispute.ruled && dispute.period === 1) {
         fresh.push({ disputeID: d, roundID: Number(r), voteIDs: state.seen[k], events: [], dispute });
       }
     } catch { /* transient RPC failure on one dispute must not kill the tick */ }

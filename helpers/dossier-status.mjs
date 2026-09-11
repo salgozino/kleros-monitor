@@ -46,7 +46,9 @@ export function pendingWork(dispute, dir) {
   if (!dispute || dispute.ruled) return { phaseA: false, phaseB: false, pending: false, phaseHint: null };
   const period = dispute.period;
   const phaseA = !dossierBuilt(dir);
-  const phaseB = (period === 1 || period === 2) && !hasDecision(dir);
+  // Period 1 (commit): agent must write decision.json (Fase B).
+  // Period 2 (vote): Phase C is fully deterministic — agent does NOT act here.
+  const phaseB = period === 1 && !hasDecision(dir);
   const pending = phaseA || phaseB;
   return { phaseA, phaseB, pending, phaseHint: phaseA ? "A" : phaseB ? "B" : null };
 }
