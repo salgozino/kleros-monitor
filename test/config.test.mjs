@@ -86,3 +86,36 @@ describe("loadConfig — HARNESS field", () => {
     expect(cfg.HARNESS).toBe("hermes");
   });
 });
+
+// ── Agent dispatcher fields ───────────────────────────────────────────────────
+
+describe("loadConfig — agent dispatcher fields", () => {
+  const MINIMAL = { WORKDIR: "/x", COURT_ID: "34", KLEROS_JUROR_HOME: "/h" };
+
+  it("applies defaults when unset", () => {
+    const cfg = loadConfig(MINIMAL);
+    expect(cfg.AGENT_BIN).toBe("hermes");
+    expect(cfg.AGENT_ARGS).toEqual(["-z"]);
+    expect(cfg.MAX_PARALLEL_AGENTS).toBe(2);
+    expect(cfg.AGENT_SPAWN_COOLDOWN_S).toBe(300);
+    expect(cfg.AGENT_TIMEOUT_S).toBe(300);
+  });
+
+  it("parses AGENT_ARGS from comma or space separated strings", () => {
+    expect(loadConfig({ ...MINIMAL, AGENT_ARGS: "-z,--model, gpt" }).AGENT_ARGS).toEqual(["-z", "--model", "gpt"]);
+    expect(loadConfig({ ...MINIMAL, AGENT_ARGS: "-z --quiet" }).AGENT_ARGS).toEqual(["-z", "--quiet"]);
+    expect(loadConfig({ ...MINIMAL, AGENT_ARGS: "   " }).AGENT_ARGS).toEqual(["-z"]);
+  });
+
+  it("parses numeric overrides and falls back on invalid values", () => {
+    const cfg = loadConfig({ ...MINIMAL, MAX_PARALLEL_AGENTS: "4", AGENT_SPAWN_COOLDOWN_S: "60", AGENT_TIMEOUT_S: "abc" });
+    expect(cfg.MAX_PARALLEL_AGENTS).toBe(4);
+    expect(cfg.AGENT_SPAWN_COOLDOWN_S).toBe(60);
+    expect(cfg.AGENT_TIMEOUT_S).toBe(300);
+    expect(loadConfig({ ...MINIMAL, MAX_PARALLEL_AGENTS: "0" }).MAX_PARALLEL_AGENTS).toBe(2);
+  });
+
+  it("overrides AGENT_BIN", () => {
+    expect(loadConfig({ ...MINIMAL, AGENT_BIN: " /usr/local/bin/hermes " }).AGENT_BIN).toBe("/usr/local/bin/hermes");
+  });
+});
