@@ -17,7 +17,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 
-import { encodeFunctionData, decodeFunctionResult, keccak256, stringToHex } from "viem";
+import { encodeFunctionData, decodeFunctionResult } from "viem";
 
 import { CORE, RPC_URLS, WORKDIR } from "./config.mjs";
 import { TOPIC_DRAW, PERIOD_NAMES, INIT_LOOKBACK_BLOCKS } from "./constants.mjs";
@@ -26,6 +26,7 @@ import ROUND_ABI from "./abis/round.mjs";
 import { rpc, rpcAny, rpcWithRetry, getLogs } from "./helpers/rpc.mjs";
 import { loadState, saveState, acquireLock, releaseLock } from "./helpers/state.mjs";
 import { sleep, fmtDate, hex } from "./helpers/utils.mjs";
+import { getDisputeHeader } from "./helpers/dispute.mjs";
 
 const execFile = promisify(execFileCb);
 
@@ -41,25 +42,7 @@ async function getRoundInfo(disputeID, round) {
   return decodeFunctionResult({ abi: ROUND_ABI, data: res });
 }
 
-// disputes(): the deployed proxy returns the 5 STATIC leading fields as flat words:
-// (uint96 courtID, address arbitrated, uint8 period, bool ruled, uint256 lastPeriodChange)
-// (the dynamic Round[] tail is truncated out by the ABI encoder for this accessor shape)
-async function getDisputeHeader(disputeID) {
-  const sel = keccak256(stringToHex("disputes(uint256)")).slice(0, 10);
-  const arg = BigInt(disputeID).toString(16).padStart(64, "0");
-  const res = await rpcWithRetry("eth_call", [{ to: CORE, data: sel + arg }, "latest"]);
-  const b = res.replace(/^0x/, "");
-  if (b.length < 64 * 5) throw new Error(`disputes(${disputeID}): unexpected returndata length ${b.length / 2}`);
-  const w = [];
-  for (let i = 0; i < 5; i++) w.push(BigInt("0x" + b.slice(i * 64, (i + 1) * 64)));
-  return {
-    courtID: w[0].toString(),
-    arbitrated: "0x" + w[1].toString(16).padStart(40, "0").slice(-40),
-    period: Number(w[2]),
-    ruled: w[3] !== 0n,
-    lastPeriodChange: w[4],
-  };
-}
+// getDisputeHeader now lives in helpers/dispute.mjs (shared with Phase D).
 
 // ------------------------------------------------------------- getLogs -----
 async function fetchDrawLogs(fromBlock, toBlock) {
