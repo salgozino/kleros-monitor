@@ -52,9 +52,10 @@ const [, , subcommand, ...rest] = process.argv;
 switch (subcommand) {
   case "monitor":
   case "watch": {
-    if (rest.includes("--dispatch")) {
+    if (rest.includes("--dispatch") && !rest.includes("--status")) {
       // --dispatch needs the standalone guard in monitor.mjs for the lock +
       // stdout contract, so re-exec the module directly (same as `dispatch`).
+      // --status is read-only and must not trigger dispatch side effects.
       const { execFileSync } = await import("node:child_process");
       const { fileURLToPath } = await import("node:url");
       const monitorPath = fileURLToPath(new URL("../monitor.mjs", import.meta.url));
