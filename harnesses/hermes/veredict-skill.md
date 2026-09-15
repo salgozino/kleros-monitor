@@ -30,6 +30,8 @@ MANDATORY PROTOCOL (in order):
 3. PHASE B — ANALYSIS AND DECISION (LLM only, do NOT touch the chain):
    a. Read the dossier chunks IN ORDER (template/criteria FIRST). Budget ~2 min per tick: read the first ~8 chunks. If NOT finished: write partial notes in notes-partial.md + checkpoint.json {"nextChunk": N, "done": false} and end with "ANALYSIS_INCOMPLETE" (the dispatcher will launch a fresh agent for this draw on a later tick).
 
+   VISION BUDGET (evidence PDFs with embedded screenshots/images): convert with pdftoppm and use vision_analyze, but cap it at 4 vision_analyze calls PER EVIDENCE FILE -- one general "describe this page" pass plus at most 3 targeted zooms. If after 4 calls a table or field is still unclear, note the uncertainty in your reasoning and move on; do NOT keep re-zooming or re-asking for "every row exactly" hoping for a cleaner read. This budget exists because dispute #263 (2026-09-15) burned 6 full agent runs (~47 min total) making 14-32 vision_analyze calls on 2 screenshot-heavy PDFs and never reached a decision, missing the voting window entirely. Diminishing-returns re-zooming is worse than a good-enough read reported honestly.
+
    b. If you DID finish reading all evidence, write TWO separate files — never mix their content, each has one job:
    1. {{WORKDIR}}/dossiers/D-R/decision.json — the verdict in machine format, for phase-c-executor.mjs to read. Never leaves this server, never goes on-chain:
       {"dispute": D, "round": R, "choice": N}
@@ -47,7 +49,7 @@ MANDATORY PROTOCOL (in order):
 
       - To generate that line, run BEFORE writing the file:
         `python3 {{WORKDIR}}/scripts/query-own-session-usage.py`
-        Its stdout output is already safe to publish (never includes session_id or anything internal to Hermes) — paste it as-is, do not rewrite it by hand or invent the numbers.
+        Its ENTIRE output is already safe to publish (it never prints session_id or anything internal to Hermes, on any stream) — paste it as-is, do not rewrite it by hand or invent the numbers. You do not need to filter or sanitize anything out of it.
 
    c. Write checkpoint.json {"done": true} and in the journal (NEVER in verdict.md or decision.json) a line with your own audit, this one CAN include the session_id:
    {"ts":"<iso>","dispute":D,"round":R,"action":"verdict-ready","choice":C,"session_id":"<SESSION_ID>","duration_s":<T_END-T_START>}
@@ -64,3 +66,4 @@ GOLDEN RULES:
 - verdict.md is the ONLY file published on-chain: it must be readable by a stranger with no operational context (no session_id, no parsing headers, nothing but the justification + the authorized metadata footer).
 - choice 0 = refuse to arbitrate (valid if evidence is insufficient or the dispute violates court rules).
 - Prioritize: complete download > analysis > report. Never read more than 8 chunks per tick.
+- Never make more than 4 vision_analyze calls per evidence file. A good-enough read reported honestly beats a stuck agent that misses the voting window.

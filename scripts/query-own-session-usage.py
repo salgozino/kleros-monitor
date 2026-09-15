@@ -6,9 +6,18 @@ model as if it were verified fact.
 
 Prints a compact per-model breakdown (tokens + cost) meant to be pasted close
 to verbatim into a public report: it deliberately NEVER prints the session id
-or any other internal identifier to stdout -- that only exists to run the
-query below and never leaves this process. Debug info (including the session
-id) goes to stderr only.
+or any other internal identifier on ANY stream -- that only exists to run the
+query below and never leaves this process.
+
+Why there is no debug flag to print it: agent harnesses (Hermes) hand the
+model the tool result with stdout and stderr MERGED, so stderr is not a
+separate channel for an LLM consumer. A session id written to stderr still
+reaches the agent, and from there the public on-chain footer. An opt-in flag
+would not help either: the agent inherits the harness environment, so one
+exported variable would silently re-arm the leak on every run while the skill
+tells the agent the output needs no filtering. The only safe separation is
+never emitting it. When you need the id for debugging, read it from
+agent-journal.jsonl, where the agent records it on a private disk file.
 
 KNOWN GAP: the API call that is CURRENTLY generating the text calling this
 script has not finished yet, so it cannot appear in its own breakdown.
@@ -101,8 +110,10 @@ def main():
         con.close()
 
     if not rows:
+        # No session id here: this message reaches the agent (merged streams)
+        # and the agent is one copy-paste away from the public on-chain footer.
         print(
-            f"No completed API calls recorded yet for session {session_id} "
+            "No completed API calls recorded yet for this session "
             "(too early in the run, or usage tracking hasn't flushed).",
             file=sys.stderr,
         )
@@ -152,7 +163,6 @@ def main():
         lines.append(f"TOTAL: {total_tokens:,} tokens ({total_calls} call(s)) \u2014 cost: {total_str}")
 
     print("\n".join(lines))
-    print(f"(debug: session_id={session_id})", file=sys.stderr)
 
 
 if __name__ == "__main__":
