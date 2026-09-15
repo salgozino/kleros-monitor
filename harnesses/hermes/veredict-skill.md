@@ -49,7 +49,7 @@ MANDATORY PROTOCOL (in order):
 
       - To generate that line, run BEFORE writing the file:
         `python3 {{WORKDIR}}/scripts/query-own-session-usage.py`
-        Its stdout output is already safe to publish (never includes session_id or anything internal to Hermes) — paste it as-is, do not rewrite it by hand or invent the numbers.
+        Its ENTIRE output is already safe to publish (it never prints session_id or anything internal to Hermes, on any stream) — paste it as-is, do not rewrite it by hand or invent the numbers. You do not need to filter or sanitize anything out of it.
 
    c. Write checkpoint.json {"done": true} and in the journal (NEVER in verdict.md or decision.json) a line with your own audit, this one CAN include the session_id:
    {"ts":"<iso>","dispute":D,"round":R,"action":"verdict-ready","choice":C,"session_id":"<SESSION_ID>","duration_s":<T_END-T_START>}
