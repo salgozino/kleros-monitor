@@ -148,23 +148,71 @@ describe("phase-d-appeal-review — full classify() path with mocked RPC", () =>
   const JUROR_ADDRESS = "0x606D2DD4Ca178349b327Ed7ACacf68058bd748Bc";
   const DISPUTES_SEL = "0x564a565d"; // disputes(uint256)
   const RULING_SEL = "0x1c3db16d"; // currentRuling(uint256)
+  const ROUND_INFO_SEL = "0x8a9bb02a"; // KlerosCore.getRoundInfo(uint256,uint256)
+  const DISPUTE_KITS_SEL = "0xacdbf51d"; // KlerosCore.disputeKits(uint256)
+  const DK_ADDRESS = "0x70B464be85A547144C72485eBa2577E5D3A45421";
+  const OTHER_JUROR = "0x93aa2f8e5ce8288d57f8785f5a40a60a42fd925e";
 
   // Mocked KlerosCore state, mutable per test. `fail` simulates an RPC
   // outage for the given selector (every RPC URL rejects → rpcWithRetry throws).
+  // `otherVotesLogsFail`, when true, makes the eth_getLogs call used by
+  // getAllVotesWithJustifications() reject (simulates the RPC-failure path
+  // for the new "other jurors' votes" fetch, independent of the other reads).
   let chain;
   const word = (n) => BigInt(n).toString(16).padStart(64, "0");
+
+  // Hand-builds one ABI-encoded VoteCast log entry: topics carry
+  // juror (indexed) + choice (indexed); data carries the dynamic voteIDs
+  // array + justification string, laid out exactly like solidity ABI
+  // encoding would (two head words = byte offsets, then each dynamic value).
+  function encodeVoteCastLog(juror, choice, voteIds, justification) {
+    const voteIdsOffset = 64; // bytes, after the two head words
+    const voteIdsWords = [word(voteIds.length), ...voteIds.map(word)];
+    const justBytes = Buffer.from(justification, "utf8");
+    const justLenPadded = Math.ceil(justBytes.length / 32) * 32;
+    const justHexPadded = justBytes.toString("hex").padEnd(justLenPadded * 2, "0");
+    const justOffset = voteIdsOffset + voteIdsWords.length * 32;
+    const data = "0x"
+      + word(voteIdsOffset) + word(justOffset)
+      + voteIdsWords.join("")
+      + word(justBytes.length) + justHexPadded;
+    return {
+      topics: [
+        "0xa000893c71384499023d2d7b21234f7b9e80c78e0330f357dcd667ff578bd3a4",
+        "0x" + word(217),
+        "0x" + juror.slice(2).toLowerCase().padStart(64, "0"),
+        "0x" + word(choice),
+      ],
+      data,
+    };
+  }
+
   function installFetchMock() {
     vi.stubGlobal("fetch", vi.fn(async (_url, opts) => {
       const body = JSON.parse(opts.body);
-      const data = body.params[0].data;
+      const method = body.method;
+      const data = method === "eth_call" ? body.params[0].data : null;
       let result;
-      if (data.startsWith(DISPUTES_SEL)) {
+      if (method === "eth_getLogs") {
+        if (chain.otherVotesLogsFail) throw new Error("mock RPC down (getLogs)");
+        const logs = chain.otherVotesLogs ?? [];
+        return { text: async () => JSON.stringify({ jsonrpc: "2.0", id: 1, result: logs }) };
+      } else if (data.startsWith(DISPUTES_SEL)) {
         if (chain.fail === "disputes") throw new Error("mock RPC down");
         // (courtID=34, arbitrated=0x00..00, period, ruled=false, lastPeriodChange=1)
         result = "0x" + word(34) + word(0) + word(chain.period) + word(0) + word(1);
       } else if (data.startsWith(RULING_SEL)) {
         if (chain.fail === "ruling") throw new Error("mock RPC down");
         result = "0x" + word(chain.ruling) + word(chain.tied ? 1 : 0) + word(0);
+      } else if (data.startsWith(ROUND_INFO_SEL)) {
+        if (chain.fail === "roundinfo") throw new Error("mock RPC down");
+        // Minimal valid getRoundInfo tuple: disputeKitID=1, rest zeroed,
+        // drawnJurors=[] (dynamic array offset still must resolve cleanly).
+        result = "0x" + word(0x20) + word(1) + word(0) + word(0) + word(0) + word(0) + word(0)
+          + word(0x160) + word(0) + word(0) + word(0) + word(0) + word(0);
+      } else if (data.startsWith(DISPUTE_KITS_SEL)) {
+        if (chain.fail === "disputekits") throw new Error("mock RPC down");
+        result = "0x" + word(0).slice(0, 24) + DK_ADDRESS.slice(2).toLowerCase();
       } else {
         throw new Error(`unexpected eth_call data in mock: ${data}`);
       }
@@ -364,5 +412,43 @@ describe("phase-d-appeal-review — full classify() path with mocked RPC", () =>
     expect(alert).toContain("Disputa 217");
     expect(alert).toContain("currentRuling failed");
     expect(existsSync(join(workdir, "dossiers", "217-r0", "appeal-review.json"))).toBe(false);
+  });
+
+  it("a genuine divergence includes every OTHER juror's full justification in the alert, with a hard-rule reminder to address them", async () => {
+    chain = {
+      period: 3, ruling: 2, tied: false, fail: null,
+      otherVotesLogs: [
+        encodeVoteCastLog(JUROR_ADDRESS, 1, [0], "Our own justification text, should be filtered out"),
+        encodeVoteCastLog(OTHER_JUROR, 2, [1], "HLTV shows the second map slot as Default, which counts toward the handicap."),
+      ],
+    };
+    const alert = await run([]);
+    expect(alert).toContain("VOTOS DE TODOS LOS JURADOS");
+    expect(alert).toContain(OTHER_JUROR);
+    expect(alert).toContain("HLTV shows the second map slot as Default");
+    // Our own vote must be filtered out — the point is to surface OTHERS' reasoning.
+    expect(alert).not.toContain("Our own justification text, should be filtered out");
+    expect(alert).toContain("REGLA DURA");
+    expect(alert).toContain("confidence/recommendation");
+  });
+
+  it("a failure fetching other jurors' votes degrades gracefully: alert still fires with a visible gap, no crash", async () => {
+    chain = { period: 3, ruling: 2, tied: false, fail: null, otherVotesLogsFail: true };
+    const alert = await run([]);
+    expect(alert).toContain("Disputa 217");
+    expect(alert).toContain("DIVERGE");
+    expect(alert).toContain("No se pudieron traer los votos");
+    expect(alert).not.toContain("VOTOS DE TODOS LOS JURADOS");
+    expect(existsSync(join(workdir, "dossiers", "217-r0", "appeal-review.json"))).toBe(false);
+  });
+
+  it("a COHERENT case (no review needed) never bothers fetching other jurors' votes", async () => {
+    writeFileSync(join(workdir, "dossiers", "217-r0", "decision.json"), JSON.stringify({ dispute: 217, round: 0, choice: 2 }));
+    chain = {
+      period: 3, ruling: 2, tied: false, fail: null,
+      otherVotesLogsFail: true, // would blow up the mock if ever called
+    };
+    const alert = await run([]);
+    expect(alert).toBe(""); // silent — coherent, no review needed, no RPC call attempted
   });
 });

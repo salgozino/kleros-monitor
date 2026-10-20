@@ -39,6 +39,12 @@ import { PERIOD_NAMES } from "./constants.mjs";
 import { loadState } from "./helpers/state.mjs";
 import { getDisputeHeader } from "./helpers/dispute.mjs";
 import { getCurrentRuling } from "./helpers/ruling.mjs";
+import { getAllVotesWithJustifications } from "./helpers/votes.mjs";
+import { deriveJuror } from "./address.mjs";
+
+// KLEROS_JUROR_ADDRESS exists ONLY for testing (simulate another juror) —
+// same convention as monitor.mjs.
+const OUR_JUROR = (process.env.KLEROS_JUROR_ADDRESS ?? deriveJuror()).toLowerCase();
 
 function dossierDir(disputeID, roundID) {
   return `${WORKDIR}/dossiers/${disputeID}-r${roundID}`;
@@ -132,7 +138,28 @@ async function classify(draw) {
   }
 
   const reviewNeeded = needsReview(decision.choice, ruling);
-  return { disputeID, roundID, dispute, decision, ruling, reviewNeeded };
+
+  // Fetch every OTHER juror's full public justification so the agent that
+  // writes appeal-review.json is never reasoning from our own verdict.md
+  // alone against a bare on-chain tally. Verified live on dispute #300
+  // (2026-10-20): a first-pass "alta confianza" appeal recommendation was
+  // written without this — one of the other 3 jurors had flagged a specific
+  // textual detail (HLTV's "Default" map-slot annotation) that directly
+  // undercut our own reading, and we never saw it until asked. Best-effort:
+  // an RPC failure here must NOT block the review (the agent can still work
+  // from decision.json + ruling alone, just with a visible gap flagged), so
+  // failures are captured as a field instead of thrown.
+  let otherVotes = null;
+  if (reviewNeeded) {
+    try {
+      const { tally, votes } = await getAllVotesWithJustifications(disputeID, roundID);
+      otherVotes = { tally, votes: votes.filter((v) => v.juror !== OUR_JUROR) };
+    } catch (e) {
+      otherVotes = { error: `could not fetch other jurors' votes: ${e.message || e}` };
+    }
+  }
+
+  return { disputeID, roundID, dispute, decision, ruling, reviewNeeded, otherVotes };
 }
 
 // Both markers may be the first file ever written under this dossier (a
@@ -196,6 +223,28 @@ function renderWorkerAlert(pending) {
       lines.push("⚖️ El ruling actual DIVERGE de nuestro voto.");
     }
     lines.push("");
+    if (p.otherVotes?.error) {
+      lines.push(`⚠️ No se pudieron traer los votos/justificaciones de los demás jurados: ${p.otherVotes.error}`);
+      lines.push("   Revisá igual la evidencia vos mismo, pero marcá en tu reasoning que este dato faltó.");
+      lines.push("");
+    } else if (p.otherVotes) {
+      lines.push(`VOTOS DE TODOS LOS JURADOS (tally: ${JSON.stringify(p.otherVotes.tally)}; tu choice=${p.decision.choice}):`);
+      for (const v of p.otherVotes.votes) {
+        lines.push(`  — jurado ${v.juror} (voteIDs ${v.voteIds.join(",")}) votó choice=${v.choice}:`);
+        const snippet = v.justification.length > 1500 ? v.justification.slice(0, 1500) + "… [truncado, leer completo on-chain]" : v.justification;
+        lines.push(`    ${snippet.replace(/\n/g, "\n    ")}`);
+      }
+      lines.push("");
+      lines.push("⚠️ REGLA DURA: antes de escribir confidence/recommendation en appeal-review.json,");
+      lines.push("   tenés que haber leído y considerado CADA una de las justificaciones de arriba —");
+      lines.push("   no alcanza con releer tu propio verdict.md y el tally desnudo. Si alguna");
+      lines.push("   justificación ajena señala un hecho o detalle textual que tu propio análisis");
+      lines.push("   no haya abordado, tu reasoning tiene que responderlo explícitamente, no");
+      lines.push("   ignorarlo. Una mayoría que coincide entre sí NO es automáticamente prueba de");
+      lines.push("   que están en lo correcto, pero tampoco podés sostener 'confianza alta' en una");
+      lines.push("   apelación sin haber confrontado sus argumentos punto por punto.");
+      lines.push("");
+    }
     lines.push("Próximo paso (esto lo hacés VOS, el agente, no un script):");
     lines.push("  1. Releé el dossier completo. Si hay evidencia escaneada sin texto");
     lines.push("     extraído (ver manifest.json → warnings), hacé OCR antes de concluir");
