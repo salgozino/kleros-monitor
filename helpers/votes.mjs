@@ -28,6 +28,19 @@ const DISPUTE_KITS_ABI = [{
   inputs: [{ type: "uint256" }], outputs: [{ type: "address" }],
 }];
 
+// DisputeKitClassic.getVoteInfo(coreDisputeID, coreRoundID, voteID). Takes the
+// CORE round ID (the kit maps it to its local round internally).
+const VOTE_INFO_ABI = [{
+  type: "function", name: "getVoteInfo", stateMutability: "view",
+  inputs: [{ type: "uint256" }, { type: "uint256" }, { type: "uint256" }],
+  outputs: [
+    { name: "account", type: "address" },
+    { name: "commit", type: "bytes32" },
+    { name: "choice", type: "uint256" },
+    { name: "voted", type: "bool" },
+  ],
+}];
+
 function pad(n) {
   return BigInt(n).toString(16).padStart(64, "0");
 }
@@ -40,14 +53,48 @@ function pad(n) {
 // getRoundInfo's return tuple contains a dynamic field (drawnJurors
 // address[]), which shifts the static fields behind an offset pointer —
 // exactly the bug class documented in the kleros-v2-onchain skill.
-export async function getDisputeKitAddress(disputeID, roundID) {
+async function readRoundInfo(disputeID, roundID) {
   const data = encodeFunctionData({ abi: ROUND_ABI, args: [BigInt(disputeID), BigInt(roundID)] });
   const res = await rpcWithRetry("eth_call", [{ to: CORE, data }, "latest"]);
-  const roundInfo = decodeFunctionResult({ abi: ROUND_ABI, data: res });
-  const disputeKitID = roundInfo.disputeKitID;
+  return decodeFunctionResult({ abi: ROUND_ABI, data: res });
+}
+
+async function readDisputeKitAddress(disputeKitID) {
   const dkData = encodeFunctionData({ abi: DISPUTE_KITS_ABI, functionName: "disputeKits", args: [disputeKitID] });
   const dkRes = await rpcWithRetry("eth_call", [{ to: CORE, data: dkData }, "latest"]);
   return decodeFunctionResult({ abi: DISPUTE_KITS_ABI, functionName: "disputeKits", data: dkRes });
+}
+
+export async function getDisputeKitAddress(disputeID, roundID) {
+  const { disputeKitID } = await readRoundInfo(disputeID, roundID);
+  return readDisputeKitAddress(disputeKitID);
+}
+
+// Reads the round's vote table from the DisputeKit, one slot per voteID:
+// who holds it, which choice it recorded and whether it was cast. This is
+// the authoritative per-round record that VoteCast logs are matched against.
+async function readVoteSlots(dkAddress, disputeID, roundID, nbVotes) {
+  const slots = [];
+  for (let voteID = 0; voteID < nbVotes; voteID++) {
+    const data = encodeFunctionData({
+      abi: VOTE_INFO_ABI, functionName: "getVoteInfo",
+      args: [BigInt(disputeID), BigInt(roundID), BigInt(voteID)],
+    });
+    const res = await rpcWithRetry("eth_call", [{ to: dkAddress, data }, "latest"]);
+    const [account, , choice, voted] = decodeFunctionResult({ abi: VOTE_INFO_ABI, functionName: "getVoteInfo", data: res });
+    slots.push({ account: account.toLowerCase(), choice: Number(choice), voted });
+  }
+  return slots;
+}
+
+// VoteCast carries no round ID, so a log belongs to this round only when every
+// voteID it claims is a cast slot of this round held by the same juror with
+// the same choice.
+function belongsToRound(vote, slots) {
+  return vote.voteIds.length > 0 && vote.voteIds.every((id) => {
+    const slot = slots[id];
+    return slot && slot.voted && slot.account === vote.juror && slot.choice === vote.choice;
+  });
 }
 
 // ABI-decodes one VoteCast log: topics[2]=juror (indexed), topics[3]=choice
@@ -73,14 +120,19 @@ function decodeVoteCastLog(log) {
 /**
  * Fetches every juror's revealed vote (choice + full public justification)
  * for one dispute/round, by reading VoteCast events from the resolved
- * DisputeKit contract. Returns:
- *   { tally: {choiceNumber: count}, votes: [{juror, choice, voteIds, justification}] }
- * Safe to call any time after the vote period has started revealing (votes
- * stay empty/partial if not everyone has revealed yet — caller should check
- * against getRoundInfo's nbVotes/totalVoted if an exact count matters).
+ * DisputeKit contract and keeping only the ones that match this round's vote
+ * table. Returns:
+ *   { dkAddress, tally: {choiceNumber: votes}, votes: [{juror, choice, voteIds, justification, ambiguous?}] }
+ * The tally counts this round's cast votes (voteIDs), which is what the ruling
+ * is computed from; one VoteCast can cast several voteIDs. A vote is flagged
+ * `ambiguous` when another matching log claims one of its voteIDs: the same
+ * juror held the same slot with the same choice in another round, and the
+ * logs alone cannot tell which justification belongs here.
  */
 export async function getAllVotesWithJustifications(disputeID, roundID, { fromBlock = "0x0" } = {}) {
-  const dkAddress = await getDisputeKitAddress(disputeID, roundID);
+  const { disputeKitID, nbVotes } = await readRoundInfo(disputeID, roundID);
+  const dkAddress = await readDisputeKitAddress(disputeKitID);
+  const slots = await readVoteSlots(dkAddress, disputeID, roundID, Number(nbVotes));
   const disputeTopic = "0x" + pad(disputeID);
   const logs = await rpcWithRetry("eth_getLogs", [{
     address: dkAddress,
@@ -88,8 +140,11 @@ export async function getAllVotesWithJustifications(disputeID, roundID, { fromBl
     fromBlock,
     toBlock: "latest",
   }]);
-  const votes = logs.map(decodeVoteCastLog);
+  const matched = logs.map(decodeVoteCastLog).filter((v) => belongsToRound(v, slots));
+  const claims = new Map();
+  for (const v of matched) for (const id of v.voteIds) claims.set(id, (claims.get(id) || 0) + 1);
+  const votes = matched.map((v) => (v.voteIds.some((id) => claims.get(id) > 1) ? { ...v, ambiguous: true } : v));
   const tally = {};
-  for (const v of votes) tally[v.choice] = (tally[v.choice] || 0) + 1;
+  for (const slot of slots) if (slot.voted) tally[slot.choice] = (tally[slot.choice] || 0) + 1;
   return { dkAddress, tally, votes };
 }

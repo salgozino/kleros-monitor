@@ -150,14 +150,19 @@ describe("phase-d-appeal-review — full classify() path with mocked RPC", () =>
   const RULING_SEL = "0x1c3db16d"; // currentRuling(uint256)
   const ROUND_INFO_SEL = "0x8a9bb02a"; // KlerosCore.getRoundInfo(uint256,uint256)
   const DISPUTE_KITS_SEL = "0xacdbf51d"; // KlerosCore.disputeKits(uint256)
+  const VOTE_INFO_SEL = "0xa7cc08fe"; // DisputeKit.getVoteInfo(uint256,uint256,uint256)
   const DK_ADDRESS = "0x70B464be85A547144C72485eBa2577E5D3A45421";
   const OTHER_JUROR = "0x93aa2f8e5ce8288d57f8785f5a40a60a42fd925e";
+  const THIRD_JUROR = "0x70239816581afff150814b46c831e2e5f9e3bf4c";
+  const STRANGER = "0x136041c8f81a6c6ba2a45e43d898c9d219e6dbda";
 
   // Mocked KlerosCore state, mutable per test. `fail` simulates an RPC
   // outage for the given selector (every RPC URL rejects → rpcWithRetry throws).
   // `otherVotesLogsFail`, when true, makes the eth_getLogs call used by
   // getAllVotesWithJustifications() reject (simulates the RPC-failure path
   // for the new "other jurors' votes" fetch, independent of the other reads).
+  // `voteSlots` is the round's DisputeKit vote table, one entry per voteID:
+  // { account, choice, voted } — it also drives getRoundInfo().nbVotes.
   let chain;
   const word = (n) => BigInt(n).toString(16).padStart(64, "0");
 
@@ -208,8 +213,15 @@ describe("phase-d-appeal-review — full classify() path with mocked RPC", () =>
         if (chain.fail === "roundinfo") throw new Error("mock RPC down");
         // Minimal valid getRoundInfo tuple: disputeKitID=1, rest zeroed,
         // drawnJurors=[] (dynamic array offset still must resolve cleanly).
-        result = "0x" + word(0x20) + word(1) + word(0) + word(0) + word(0) + word(0) + word(0)
+        const nbVotes = (chain.voteSlots ?? []).length;
+        result = "0x" + word(0x20) + word(1) + word(0) + word(0) + word(nbVotes) + word(0) + word(0)
           + word(0x160) + word(0) + word(0) + word(0) + word(0) + word(0);
+      } else if (data.startsWith(VOTE_INFO_SEL)) {
+        const voteID = Number(BigInt("0x" + data.slice(-64)));
+        const slot = (chain.voteSlots ?? [])[voteID];
+        if (!slot) throw new Error(`mock: getVoteInfo out of range (${voteID})`);
+        result = "0x" + slot.account.slice(2).toLowerCase().padStart(64, "0") + word(0)
+          + word(slot.choice) + word(slot.voted === false ? 0 : 1);
       } else if (data.startsWith(DISPUTE_KITS_SEL)) {
         if (chain.fail === "disputekits") throw new Error("mock RPC down");
         result = "0x" + word(0).slice(0, 24) + DK_ADDRESS.slice(2).toLowerCase();
@@ -417,6 +429,10 @@ describe("phase-d-appeal-review — full classify() path with mocked RPC", () =>
   it("a genuine divergence includes every OTHER juror's full justification in the alert, with a hard-rule reminder to address them", async () => {
     chain = {
       period: 3, ruling: 2, tied: false, fail: null,
+      voteSlots: [
+        { account: JUROR_ADDRESS, choice: 1 },
+        { account: OTHER_JUROR, choice: 2 },
+      ],
       otherVotesLogs: [
         encodeVoteCastLog(JUROR_ADDRESS, 1, [0], "Our own justification text, should be filtered out"),
         encodeVoteCastLog(OTHER_JUROR, 2, [1], "HLTV shows the second map slot as Default, which counts toward the handicap."),
@@ -450,5 +466,87 @@ describe("phase-d-appeal-review — full classify() path with mocked RPC", () =>
     };
     const alert = await run([]);
     expect(alert).toBe(""); // silent — coherent, no review needed, no RPC call attempted
+  });
+
+  // Round 0 of the mocked dispute: us (voteID 0), OTHER_JUROR (1), THIRD_JUROR (2,3).
+  const ROUND0_SLOTS = [
+    { account: JUROR_ADDRESS, choice: 1 },
+    { account: OTHER_JUROR, choice: 2 },
+    { account: THIRD_JUROR, choice: 2 },
+    { account: THIRD_JUROR, choice: 2 },
+  ];
+
+  it("only shows votes cast in THIS round: a VoteCast from another round of the same dispute is excluded", async () => {
+    chain = {
+      period: 3, ruling: 2, tied: false, fail: null,
+      voteSlots: ROUND0_SLOTS,
+      otherVotesLogs: [
+        encodeVoteCastLog(OTHER_JUROR, 2, [1], "Round 0 reasoning from the other juror."),
+        // Same dispute, different round: STRANGER does not hold voteID 1 in round 0.
+        encodeVoteCastLog(STRANGER, 2, [1], "Round 1 reasoning that must not leak into round 0."),
+        // Same juror/voteIDs as round 0 but a choice round 0 never recorded.
+        encodeVoteCastLog(THIRD_JUROR, 1, [2, 3], "Third juror in another round with another choice."),
+      ],
+    };
+    const alert = await run([]);
+    expect(alert).toContain("Round 0 reasoning from the other juror.");
+    expect(alert).not.toContain(STRANGER);
+    expect(alert).not.toContain("Round 1 reasoning that must not leak into round 0.");
+    expect(alert).not.toContain("Third juror in another round with another choice.");
+  });
+
+  it("the tally counts this round's votes (voteIDs), not VoteCast logs", async () => {
+    chain = {
+      period: 3, ruling: 2, tied: false, fail: null,
+      voteSlots: ROUND0_SLOTS,
+      otherVotesLogs: [
+        encodeVoteCastLog(JUROR_ADDRESS, 1, [0], "ours"),
+        encodeVoteCastLog(OTHER_JUROR, 2, [1], "other"),
+        encodeVoteCastLog(THIRD_JUROR, 2, [2, 3], "third, two votes in one cast"),
+      ],
+    };
+    const alert = await run([]);
+    expect(alert).toContain('tally: {"1":1,"2":3}');
+  });
+
+  it("writes every other juror's FULL justification to other-votes.json and points the alert at it", async () => {
+    const long = "A".repeat(1600) + " KEY-DETAIL-PAST-THE-CUT " + "B".repeat(1400);
+    chain = {
+      period: 3, ruling: 2, tied: false, fail: null,
+      voteSlots: ROUND0_SLOTS.slice(0, 2),
+      otherVotesLogs: [
+        encodeVoteCastLog(JUROR_ADDRESS, 1, [0], "ours"),
+        encodeVoteCastLog(OTHER_JUROR, 2, [1], long),
+      ],
+    };
+    const alert = await run([]);
+    const file = join(workdir, "dossiers", "217-r0", "other-votes.json");
+    expect(existsSync(file)).toBe(true);
+    const saved = JSON.parse(readFileSync(file, "utf8"));
+    expect(saved.dispute).toBe("217");
+    expect(saved.round).toBe(0);
+    expect(saved.tally).toEqual({ 1: 1, 2: 1 });
+    expect(saved.votes).toHaveLength(1); // ours is filtered out
+    expect(saved.votes[0].juror).toBe(OTHER_JUROR);
+    expect(saved.votes[0].justification).toBe(long);
+    expect(alert).toContain(file);
+    expect(alert).not.toContain("KEY-DETAIL-PAST-THE-CUT"); // the alert keeps only an excerpt
+    expect(alert).toContain("truncado");
+    expect(existsSync(join(workdir, "dossiers", "217-r0", "appeal-review.json"))).toBe(false);
+  });
+
+  it("flags a vote as ambiguous when two VoteCast logs claim the same round slot", async () => {
+    chain = {
+      period: 3, ruling: 2, tied: false, fail: null,
+      voteSlots: ROUND0_SLOTS.slice(0, 2),
+      otherVotesLogs: [
+        encodeVoteCastLog(OTHER_JUROR, 2, [1], "first cast"),
+        encodeVoteCastLog(OTHER_JUROR, 2, [1], "second cast, same juror/voteID/choice from another round"),
+      ],
+    };
+    const alert = await run([]);
+    expect(alert).toContain("first cast");
+    expect(alert).toContain("second cast");
+    expect(alert).toContain("AMBIGUO");
   });
 });

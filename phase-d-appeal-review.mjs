@@ -26,7 +26,9 @@
 //      and report a confidence level. The agent — NOT this script — writes
 //      dossiers/D-R/appeal-review.json once its review is done (same
 //      separation of concerns as decision.json in Phase B: deterministic
-//      code never records a judgment-based conclusion).
+//      code never records a judgment-based conclusion). The other jurors'
+//      votes for THIS round, with their full justifications, are written to
+//      dossiers/D-R/other-votes.json; the alert carries only excerpts.
 //
 // Safety: read-only. Never touches the private key, never broadcasts
 // anything, never calls fundAppeal. Financing an appeal is always a manual,
@@ -51,6 +53,9 @@ function dossierDir(disputeID, roundID) {
 }
 function markerPath(disputeID, roundID) {
   return `${dossierDir(disputeID, roundID)}/appeal-review.json`;
+}
+function otherVotesPath(disputeID, roundID) {
+  return `${dossierDir(disputeID, roundID)}/other-votes.json`;
 }
 function decisionPath(disputeID, roundID) {
   return `${dossierDir(disputeID, roundID)}/decision.json`;
@@ -158,6 +163,20 @@ async function classify(draw) {
       otherVotes = { error: `could not fetch other jurors' votes: ${e.message || e}` };
     }
   }
+  // The alert only carries an excerpt of each justification; the full text
+  // goes to the dossier so the agent can read every word. Rewritten on each
+  // tick until the review marker exists, so it always reflects the chain.
+  if (otherVotes && !otherVotes.error) {
+    try {
+      writeFileSync(
+        otherVotesPath(disputeID, roundID),
+        JSON.stringify({ dispute: disputeID, round: roundID, tally: otherVotes.tally, votes: otherVotes.votes }, null, 2),
+      );
+      otherVotes.file = otherVotesPath(disputeID, roundID);
+    } catch (e) {
+      otherVotes.fileError = `could not write ${otherVotesPath(disputeID, roundID)}: ${e.message || e}`;
+    }
+  }
 
   return { disputeID, roundID, dispute, decision, ruling, reviewNeeded, otherVotes };
 }
@@ -229,14 +248,25 @@ function renderWorkerAlert(pending) {
       lines.push("");
     } else if (p.otherVotes) {
       lines.push(`VOTOS DE TODOS LOS JURADOS (tally: ${JSON.stringify(p.otherVotes.tally)}; tu choice=${p.decision.choice}):`);
+      const fullText = p.otherVotes.file ?? "on-chain (VoteCast)";
+      if (p.otherVotes.file) {
+        lines.push(`Justificaciones COMPLETAS (sin recortar): ${p.otherVotes.file}`);
+      } else {
+        lines.push(`⚠️ ${p.otherVotes.fileError} — las justificaciones completas solo están on-chain.`);
+      }
       for (const v of p.otherVotes.votes) {
         lines.push(`  — jurado ${v.juror} (voteIDs ${v.voteIds.join(",")}) votó choice=${v.choice}:`);
-        const snippet = v.justification.length > 1500 ? v.justification.slice(0, 1500) + "… [truncado, leer completo on-chain]" : v.justification;
+        if (v.ambiguous) {
+          lines.push("    ⚠️ AMBIGUO: otro VoteCast reclama el mismo jurado/voteID/choice (otra ronda);");
+          lines.push("       no se puede saber cuál de estas justificaciones es la de esta ronda.");
+        }
+        const snippet = v.justification.length > 1500 ? v.justification.slice(0, 1500) + `… [truncado, completo en ${fullText}]` : v.justification;
         lines.push(`    ${snippet.replace(/\n/g, "\n    ")}`);
       }
       lines.push("");
       lines.push("⚠️ REGLA DURA: antes de escribir confidence/recommendation en appeal-review.json,");
-      lines.push("   tenés que haber leído y considerado CADA una de las justificaciones de arriba —");
+      lines.push("   tenés que haber leído COMPLETA (no el extracto de arriba) y considerado CADA");
+      lines.push("   una de las justificaciones ajenas —");
       lines.push("   no alcanza con releer tu propio verdict.md y el tally desnudo. Si alguna");
       lines.push("   justificación ajena señala un hecho o detalle textual que tu propio análisis");
       lines.push("   no haya abordado, tu reasoning tiene que responderlo explícitamente, no");
